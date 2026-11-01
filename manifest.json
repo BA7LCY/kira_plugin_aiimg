@@ -1,0 +1,21 @@
+{
+  "plugin_id": "kira_plugin_aiimg",
+  "display_name": "AI Image",
+  "version": "0.2.13",
+  "author": "BA7LCY",
+  "icon": "icon.png",
+  "description": "KiraAI 原生多服务商生图、改图、自拍、批量与视频插件，全部配置在 WebUI 完成。",
+  "repo": "https://github.com/BA7LCY/kira_plugin_aiimg",
+  "core_version": ">=3.0.2",
+  "tags": [
+    "image",
+    "video",
+    "tools"
+  ],
+  "locales": {
+    "zh": {
+      "display_name": "AI Image",
+      "description": "多服务商生图、改图、自拍、批量与视频工具，全部配置在 WebUI 完成。"
+    }
+  }
+}

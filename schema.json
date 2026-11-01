@@ -1,0 +1,247 @@
+{
+  "welcome_info": {
+    "type": "info",
+    "name": "配置入口",
+    "hint": "推荐在 WebUI 修改配置：那里有服务商编辑、链路排序、任务和画廊。这个页面只保留基础开关，改完请回 WebUI 确认。",
+    "level": "info"
+  },
+  "section_access": {
+    "type": "section",
+    "name": "访问控制",
+    "collapsed": true,
+    "fields": {
+      "whitelist": {
+        "type": "textarea",
+        "name": "白名单",
+        "default": "",
+        "note": "一行一个：用户编号或群编号，两种都认。想限定平台就写「平台名:编号」，比如 qq:123456。群编号写进来后，这个群里所有人都能用。留空表示不做限制，所有人都能用。"
+      },
+      "whitelist_tip": {
+        "type": "info",
+        "name": " ",
+        "hint": "一行一个：用户编号或群编号，两种都认。想限定平台就写「平台名:编号」，比如 qq:123456。群编号写进来后，这个群里所有人都能用。留空表示不做限制，所有人都能用。",
+        "level": "info"
+      }
+    }
+  },
+  "section_features": {
+    "type": "section",
+    "name": "功能开关与默认值",
+    "collapsed": true,
+    "fields": {
+      "draw_enabled": {
+        "type": "switch",
+        "name": "文生图",
+        "default": true,
+        "note": "允许模型调用文生图工具。关掉后模型看不到可用的出图能力，调用时会直接回一句“已关闭”。"
+      },
+      "edit_enabled": {
+        "type": "switch",
+        "name": "改图",
+        "default": true,
+        "note": "允许拿现有图片做修改（图生图）。关掉后对应工具同样会拒绝调用。"
+      },
+      "selfie_enabled": {
+        "type": "switch",
+        "name": "自拍",
+        "default": true,
+        "note": "允许用参考照片生成自拍/人像。参考图来源在下面的「使用人设自拍图」开关里选，缺参考图时会提示。"
+      },
+      "batch_enabled": {
+        "type": "switch",
+        "name": "批量生图",
+        "default": true,
+        "note": "允许一次提交多条提示词批量出图。关掉后批量工具不可用，单张文生图不受影响。"
+      },
+      "video_enabled": {
+        "type": "switch",
+        "name": "视频生成",
+        "default": false,
+        "note": "默认关闭。打开前先在服务商里配好视频接口并接上链路，否则调用时只会提示没有可用服务商。"
+      },
+      "draw_default_output": {
+        "type": "string",
+        "name": "文生图默认输出",
+        "default": "1024x1024",
+        "note": "没在链路和服务商里指定画幅时用这个。优先级：链路画幅 > 服务商默认画幅 > 这里。可写 1024x1024、4K 或 3:4 4K。"
+      },
+      "edit_default_output": {
+        "type": "string",
+        "name": "改图默认输出",
+        "default": "1024x1024",
+        "note": "没在链路和服务商里指定画幅时用这个。优先级：链路画幅 > 服务商默认画幅 > 这里。"
+      },
+      "selfie_default_output": {
+        "type": "string",
+        "name": "自拍默认输出",
+        "default": "768x1024",
+        "note": "没在链路和服务商里指定画幅时用这个。优先级：链路画幅 > 服务商默认画幅 > 这里。"
+      },
+      "prefer_resolution": {
+        "type": "switch",
+        "name": "画幅冲突时听分辨率",
+        "default": true,
+        "note": "模型同时给了具体尺寸和比例时只保留一个：打开保留尺寸、丢掉比例；关掉保留比例、丢掉尺寸。丢掉的那一边不会自动补值。"
+      },
+      "selfie_use_persona": {
+        "type": "switch",
+        "name": "使用人设自拍图",
+        "default": true,
+        "note": "打开用当前人设的参考人像；关掉用下面自己上传的图片。"
+      },
+      "selfie_follow_edit_chain": {
+        "type": "switch",
+        "name": "自拍沿用改图链路",
+        "default": true,
+        "note": "自拍没单独配链路时，自动借用改图那条链路兜底。关掉就必须给自拍单独配链路。"
+      }
+    }
+  },
+  "section_queue": {
+    "type": "section",
+    "name": "队列",
+    "collapsed": true,
+    "fields": {
+      "max_running": {
+        "type": "integer",
+        "name": "全局并行生成数",
+        "default": 2,
+        "min": 1,
+        "max": 30,
+        "note": "同一时间最多跑几个任务，多出来的排队等待。调大能更快处理多人请求，也更容易触发服务商限流。默认 2。"
+      },
+      "max_queued": {
+        "type": "integer",
+        "name": "队列容量",
+        "default": 16,
+        "min": 1,
+        "max": 128,
+        "note": "正在跑和排队的任务总数上限，超过后新请求会被直接拒绝并提示队列已满。默认 16。"
+      },
+      "batch_max_count": {
+        "type": "integer",
+        "name": "批量上限",
+        "default": 8,
+        "min": 1,
+        "max": 32,
+        "note": "一条批量指令最多接受几条提示词，超出部分会被截掉。这里只限条数，不限制总耗时。默认 8。"
+      },
+      "batch_concurrency": {
+        "type": "integer",
+        "name": "批量并行数",
+        "default": 2,
+        "min": 1,
+        "max": 30,
+        "note": "同一条批量任务里最多同时跑几条，跑完一条补下一条。调大更快，但会更快消耗服务商配额。默认 2。"
+      },
+      "max_user_image_tasks": {
+        "type": "integer",
+        "name": "每用户图片任务上限",
+        "default": 1,
+        "min": 1,
+        "max": 16,
+        "note": "同一个人同时能挂几个图片任务（在跑和排队都算）。设为 1 表示上一张没完成时再发会被拒绝。默认 1。"
+      },
+      "max_user_video_tasks": {
+        "type": "integer",
+        "name": "每用户视频任务上限",
+        "default": 1,
+        "min": 1,
+        "max": 16,
+        "note": "同一个人同时能挂几个视频任务（在跑和排队都算），和图片任务分开计算。默认 1。"
+      },
+      "task_retention_hours": {
+        "type": "integer",
+        "name": "任务记录保留小时",
+        "default": 24,
+        "min": 1,
+        "max": 8760,
+        "note": "已结束的任务记录保留多久，过期就从任务列表清掉；图片文件由画廊的保留天数清理。默认 24 小时。"
+      },
+      "provider_failure_threshold": {
+        "type": "integer",
+        "name": "服务商熔断阈值",
+        "default": 3,
+        "min": 1,
+        "max": 20,
+        "note": "同一家连续失败到这个次数就先跳过它，冷却结束再自动恢复。默认 3 次。"
+      },
+      "provider_cooldown_seconds": {
+        "type": "integer",
+        "name": "熔断冷却秒数",
+        "default": 120,
+        "min": 10,
+        "max": 3600,
+        "note": "被熔断的服务商冷却多久再试。默认 120 秒。"
+      }
+    }
+  },
+  "section_gallery": {
+    "type": "section",
+    "name": "画廊",
+    "collapsed": true,
+    "fields": {
+      "max_count": {
+        "type": "integer",
+        "name": "最大图片数",
+        "default": 0,
+        "note": "0 表示不限；收藏不占名额。每存一张新图就检查一次，超出时删掉最早的非收藏图。自拍和视频另外计算。"
+      },
+      "retention_days": {
+        "type": "integer",
+        "name": "保留天数",
+        "default": 0,
+        "note": "0 表示不限；收藏的图过期也不会被删。两项都填时先删过期的，再删超出数量的。自拍和视频另外计算。"
+      },
+      "selfie_max_count": {
+        "type": "integer",
+        "name": "自拍最大图片数",
+        "default": 0,
+        "note": "0 表示不限；收藏不占名额。每存一张新自拍就检查一次，超出时删掉最早的非收藏自拍。"
+      },
+      "selfie_retention_days": {
+        "type": "integer",
+        "name": "自拍保留天数",
+        "default": 0,
+        "note": "0 表示不限；收藏的自拍过期也不会被删。两项都填时先删过期的，再删超出数量的。"
+      },
+      "video_max_count": {
+        "type": "integer",
+        "name": "最大视频数",
+        "default": 0,
+        "note": "0 表示不限；收藏不占名额。每存一段新视频就检查一次，超出时删掉最早的非收藏视频。"
+      },
+      "video_retention_days": {
+        "type": "integer",
+        "name": "视频保留天数",
+        "default": 0,
+        "note": "0 表示不限；收藏的视频过期也不会被删。两项都填时先删过期的，再删超出数量的。"
+      }
+    }
+  },
+  "section_compat": {
+    "type": "section",
+    "name": "和框架自带生图的关系",
+    "collapsed": true,
+    "fields": {
+      "replace_builtin_media": {
+        "type": "switch",
+        "name": "隐藏框架自带的生图与生视频",
+        "default": true,
+        "note": "开着时，本插件运行期间框架自带的 <img>、<selfie>、<video> 标签会被摘掉，出图改由本插件的工具完成；只在接得住时才摘（要有生图服务商，自拍要先填参考图，视频要先配视频服务商）。其它插件自己注册的同名标签不受影响（例如 NAI 的 <img>）。装了本插件就不用再去框架设置里关“图片生成”，那个开关留着即可。关掉本开关后框架自带那套恢复，两套并存。"
+      }
+    }
+  },
+  "providers": {
+    "type": "json",
+    "name": "服务商配置",
+    "default": [],
+    "hint": "在 WebUI 的服务商页面里配置；一般不用手改这里。"
+  },
+  "chains": {
+    "type": "json",
+    "name": "功能链路",
+    "default": {},
+    "hint": "在 WebUI 的功能链路页面里排顺序；一般不用手改这里。"
+  }
+}

@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.testdeps/
+.pytest_tmp/
+.tmp/
+_compile_check.py
+*.zip
+
+# Source artwork kept outside the package
+1.jpg
