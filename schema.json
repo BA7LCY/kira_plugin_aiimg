@@ -256,6 +256,20 @@
         "max": 2048,
         "note": "服务商返回的视频超过这个大小就丢弃。默认 256 MB。"
       },
+      "video_parallel_download": {
+        "type": "switch",
+        "name": "视频分片下载",
+        "default": true,
+        "note": "大视频按字节范围多路并行下载，断了也能续传。服务商不支持分片时会自动改回单路。默认开。"
+      },
+      "delivery_attempts": {
+        "type": "integer",
+        "name": "投递重试次数",
+        "default": 3,
+        "min": 1,
+        "max": 10,
+        "note": "同一张图发送失败时最多试几次。整条发送一直失败会改成逐张重发，一张坏图不会连累其它张。默认 3 次。"
+      },
       "trusted_result_origins": {
         "type": "textarea",
         "name": "结果地址白名单",

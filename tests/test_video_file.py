@@ -49,7 +49,7 @@ async def test_download_validates_response_and_redirects(tmp_path, monkeypatch, 
         if request.path == "/html":
             return web.Response(text="<html>not a video</html>", content_type="video/mp4")
         if request.path == "/partial":
-            return web.Response(body=payload[:30], status=206)
+            return web.Response(body=payload[:30])
         return web.Response(body=payload, content_type="video/mp4")
 
     app = web.Application()

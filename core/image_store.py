@@ -16,7 +16,13 @@ import time
 import uuid
 from pathlib import Path
 
-from .image_format import guess_image_mime_and_ext, preview_jpeg, thumbnail_webp
+from .image_format import (
+    content_digest,
+    guess_image_mime_and_ext,
+    normalize_orientation,
+    preview_jpeg,
+    thumbnail_webp,
+)
 from .logbook import get_logger
 
 logger = get_logger("gallery")
@@ -58,11 +64,16 @@ class ImageStore:
                 sid TEXT NOT NULL DEFAULT '',
                 task_id TEXT NOT NULL DEFAULT '',
                 prompt TEXT NOT NULL DEFAULT '',
-                bytes INTEGER NOT NULL DEFAULT 0
+                bytes INTEGER NOT NULL DEFAULT 0,
+                digest TEXT NOT NULL DEFAULT ''
             )
             """
         )
-        for column, decl in (("prompt", "TEXT NOT NULL DEFAULT ''"), ("bytes", "INTEGER NOT NULL DEFAULT 0")):
+        for column, decl in (
+            ("prompt", "TEXT NOT NULL DEFAULT ''"),
+            ("bytes", "INTEGER NOT NULL DEFAULT 0"),
+            ("digest", "TEXT NOT NULL DEFAULT ''"),
+        ):
             try:
                 self._db.execute(f"ALTER TABLE images ADD COLUMN {column} {decl}")
             except sqlite3.OperationalError:
@@ -72,6 +83,7 @@ class ImageStore:
             "CREATE INDEX IF NOT EXISTS idx_images_favorite ON images(favorite)",
             "CREATE INDEX IF NOT EXISTS idx_images_kind ON images(kind)",
             "CREATE INDEX IF NOT EXISTS idx_images_archived ON images(archived, created_at)",
+            "CREATE INDEX IF NOT EXISTS idx_images_digest ON images(digest)",
         ):
             self._db.execute(statement)
         self._db.commit()
@@ -103,8 +115,25 @@ class ImageStore:
         task_id: str,
         kind: str = "image",
         prompt: str = "",
+        dedupe: bool = False,
     ) -> Path:
-        """Persist bytes into the gallery and return the stored path."""
+        """Persist bytes into the gallery and return the stored path.
+
+        With `dedupe`, identical bytes are stored once: a repeat generation
+        that lands on the same image reuses the existing file, which keeps
+        retention budgets from being spent on duplicates.
+        """
+        data = normalize_orientation(data)
+        digest = content_digest(data)
+        if dedupe:
+            existing = self.find_by_digest(digest)
+            if existing is not None:
+                logger.info(
+                    "[aiimg] 画廊已有同一张图 %s，复用不重复入库（任务 %s）",
+                    existing["id"], task_id or "-",
+                )
+                self._remember(sid, str(existing["path"]))
+                return Path(str(existing["path"]))
         mime, ext = guess_image_mime_and_ext(data)
         image_id = uuid.uuid4().hex[:16]
         created = time.time()
@@ -118,8 +147,8 @@ class ImageStore:
             """
             INSERT INTO images
                 (id, path, kind, created_at, favorite, archived,
-                 provider, model, size, sid, task_id, prompt, bytes)
-            VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?)
+                 provider, model, size, sid, task_id, prompt, bytes, digest)
+            VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 image_id,
@@ -133,6 +162,7 @@ class ImageStore:
                 task_id,
                 str(prompt or "")[:2000],
                 len(data),
+                digest,
             ),
         )
         await self.cleanup()
@@ -165,6 +195,18 @@ class ImageStore:
     def get(self, image_id: str) -> dict | None:
         row = self._execute(
             "SELECT * FROM images WHERE id = ?", (image_id,)
+        ).fetchone()
+        return self._row_to_dict(row) if row else None
+
+    def find_by_digest(self, digest: str) -> dict | None:
+        """Return an existing row with the same content fingerprint."""
+        text = str(digest or "").strip()
+        if not text:
+            return None
+        row = self._execute(
+            "SELECT * FROM images WHERE digest = ? AND kind != 'video' "
+            "ORDER BY created_at ASC LIMIT 1",
+            (text,),
         ).fetchone()
         return self._row_to_dict(row) if row else None
 
@@ -471,6 +513,8 @@ class ImageStore:
 
     @staticmethod
     def _row_to_dict(row: sqlite3.Row | tuple) -> dict:
+        if isinstance(row, sqlite3.Row):
+            return dict(row)
         names = (
             "id",
             "path",
@@ -485,6 +529,7 @@ class ImageStore:
             "task_id",
             "prompt",
             "bytes",
+            "digest",
         )
         return dict(zip(names, row))
 

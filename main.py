@@ -36,6 +36,7 @@ from .core import refs as refs_mod
 from .core import settings as settings_mod
 from .core.chains import ChainItem, chain_for
 from .core.debounce import Debouncer
+from .core.delivery import deliver_chain
 from .core.image_store import ImageStore
 from .core.image_format import validate_image_bytes
 from .core.logbook import clip, elapsed_ms, mask
@@ -134,6 +135,7 @@ def _facts_line(facts: dict[str, str]) -> str:
         ("size", "尺寸"),
         ("provider", "服务商"),
         ("error_kind", "失败类别"),
+        ("delivery", "投递"),
     ):
         value = str(facts.get(key) or "").strip()
         if value:
@@ -360,19 +362,48 @@ class AIImagePlugin(BasePlugin):
         except (TypeError, ValueError):
             return None
 
-    async def _download_video(self, url: str) -> Path:
+    async def _download_video(self, url: str, provider_id: str = "") -> Path:
         advanced = self._cfg("section_advanced") or {}
         if not isinstance(advanced, dict):
             advanced = {}
         max_bytes = int(advanced.get("video_max_mb") or 256) * 1024 * 1024
         timeout = int(advanced.get("download_timeout_seconds") or 120)
+        parallel = advanced.get("video_parallel_download")
         return await download_video(
             url,
             self._data_dir / "gallery",
             self._fetch_policy(),
             max_bytes=max_bytes,
             timeout=timeout,
+            headers=self._video_headers(url, provider_id),
+            parallel=True if parallel is None else bool(parallel),
         )
+
+    def _video_headers(self, url: str, provider_id: str) -> dict[str, str]:
+        """Credentials for the provider origin, withheld from CDN redirects."""
+        if not provider_id:
+            return {}
+        try:
+            settings = self._registry.get_settings(provider_id)
+        except Exception:
+            return {}
+        if settings is None:
+            return {}
+        host = origin(str(url or ""))
+        provider_origins = {
+            origin(str(value))
+            for value in (
+                settings.base_url,
+                settings.server_url,
+                settings.full_generate_url,
+                settings.full_edit_url,
+            )
+            if value
+        }
+        if not host or host not in provider_origins:
+            return {}
+        key = settings.api_keys[0] if settings.api_keys else ""
+        return {"Authorization": f"Bearer {key}"} if key else {}
 
     def _consecutive_failures(self, provider_id: str) -> int:
         for entry in self._stats.snapshot():
@@ -1817,6 +1848,7 @@ class AIImagePlugin(BasePlugin):
                 task_id=record.task_id,
                 kind="frame",
                 prompt=prompt,
+                dedupe=True,
             )
             return Path(path)
         return None
@@ -1866,7 +1898,7 @@ class AIImagePlugin(BasePlugin):
                         images=images or None,
                         extra={"aspect_ratio": record.extra.get("aspect_ratio") or ""},
                     )
-                video_path = await self._download_video(result.url)
+                video_path = await self._download_video(result.url, provider_id)
                 try:
                     await self._gallery.register_video(
                         video_path, provider_id=provider_id, model=result.model or "",
@@ -2015,6 +2047,7 @@ class AIImagePlugin(BasePlugin):
                         task_id=record.task_id,
                         kind=gallery_kind,
                         prompt=final_prompt,
+                        dedupe=True,
                     )
                     media.append(str(path))
                     model = result.model or model
@@ -2184,14 +2217,22 @@ class AIImagePlugin(BasePlugin):
         # The synthetic event below reaches the model only; whatever it replies
         # is a separate message, so an empty reply can no longer swallow the
         # image.
-        await self._safe_send(record.sid, MessageChain(elements))
-        self._mark_ack_delivered(record.task_id)
-        logger.info(
-            "[aiimg] 任务 %s 媒体已发送：%d 个元素（%s）",
-            record.task_id,
-            len(elements),
-            "视频" if facts["kind"] == "video" else "图片",
-        )
+        delivered = await self._safe_send(record.sid, MessageChain(elements))
+        if delivered:
+            self._mark_ack_delivered(record.task_id)
+            logger.info(
+                "[aiimg] 任务 %s 媒体已发送：%d 个元素（%s）",
+                record.task_id,
+                len(elements),
+                "视频" if facts["kind"] == "video" else "图片",
+            )
+        else:
+            logger.error(
+                "[aiimg] 任务 %s 媒体投递彻底失败，%d 个元素都没发出去",
+                record.task_id,
+                len(elements),
+            )
+            facts["delivery"] = "failed"
         published = await self._publish_notification(record, elements, template, facts)
         logger.info(
             "[aiimg] 任务 %s 完成通知%s",
@@ -2199,11 +2240,25 @@ class AIImagePlugin(BasePlugin):
             "已交给模型" if published else "未发布（模型侧不可用）",
         )
 
-    async def _safe_send(self, sid: str, chain: MessageChain) -> None:
-        try:
-            await self.ctx.send_message_chain(sid, chain)
-        except Exception as exc:
-            logger.warning("[aiimg] failed to deliver to %s: %s", sid, exc)
+    async def _safe_send(self, sid: str, chain: MessageChain) -> bool:
+        """Deliver a chain with retries; report whether anything reached the chat.
+
+        A finished image is expensive to lose, so transient adapter failures are
+        retried, and a chain the adapter keeps rejecting is retried element by
+        element: one malformed image no longer swallows the rest of a batch.
+        """
+        advanced = self._cfg("section_advanced") or {}
+        if not isinstance(advanced, dict):
+            advanced = {}
+        attempts = int(advanced.get("delivery_attempts") or 3)
+        return await deliver_chain(
+            self.ctx.send_message_chain,
+            sid,
+            chain,
+            make_chain=MessageChain,
+            logger=logger,
+            attempts=attempts,
+        )
 
     async def _publish_notification(
         self,

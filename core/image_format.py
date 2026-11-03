@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import io
 import re
 
@@ -60,6 +61,45 @@ def image_data_url(data: bytes, mime: str = "") -> str:
     """Wrap image bytes as a data: URL, guessing the MIME type if omitted."""
     resolved = str(mime or "").strip() or guess_image_mime_and_ext(data)[0]
     return f"data:{resolved};base64,{base64.b64encode(data).decode('ascii')}"
+
+
+def normalize_orientation(data: bytes) -> bytes:
+    """Bake the EXIF orientation into the pixels and drop the tag.
+
+    Phone cameras store "rotate me 90°" in EXIF instead of rotating pixels.
+    Anything that re-encodes the image (thumbnails, collages, edits) would
+    otherwise show it sideways, so we normalize once at ingest.
+    """
+    try:
+        from PIL import Image as PILImage
+        from PIL import ImageOps
+
+        with PILImage.open(io.BytesIO(data)) as image:
+            exif = image.getexif()
+            orientation = int(exif.get(0x0112, 1) or 1) if exif else 1
+            if orientation in (0, 1):
+                return data
+            fixed = ImageOps.exif_transpose(image)
+            if fixed is None:
+                return data
+            if fixed.mode not in ("RGB", "RGBA", "L", "LA"):
+                fixed = fixed.convert("RGB")
+            output = io.BytesIO()
+            fmt = "PNG" if (image.format or "").upper() == "PNG" else "JPEG"
+            save_args: dict = {"format": fmt}
+            if fmt == "JPEG":
+                save_args.update(quality=95, subsampling=0)
+                if fixed.mode not in ("RGB", "L"):
+                    fixed = fixed.convert("RGB")
+            fixed.save(output, **save_args)
+            return output.getvalue()
+    except Exception:
+        return data
+
+
+def content_digest(data: bytes) -> str:
+    """Stable fingerprint for duplicate detection."""
+    return hashlib.sha256(data or b"").hexdigest()
 
 
 def image_dimensions(data: bytes) -> tuple[int, int] | None:

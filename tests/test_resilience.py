@@ -321,7 +321,7 @@ def test_video_success_requires_saved_media(plugin_module, tmp_path, download_ok
     async def generate(*args, **kwargs):
         return SimpleNamespace(url="https://example.com/clip.mp4", model="m", size="720p", duration=5)
 
-    async def download(url):
+    async def download(url, provider_id=""):
         if not download_ok:
             raise ValueError("invalid video")
         path = tmp_path / "clip.mp4"
