@@ -136,8 +136,7 @@ def test_size_mismatch_is_reported_once(caplog):
 
     messages = [record.getMessage() for record in caplog.records]
     assert messages == [
-        "[OpenAICompat] 输出尺寸与请求不一致: requested=854x1842 got=935x1683 (服务商可能忽略尺寸)"
-        .replace("忽略尺寸", "忽略 size")
+        "[OpenAICompat] 输出尺寸与请求不一致: requested=854x1842 got=935x1683"
     ]
 
 

@@ -160,7 +160,7 @@ def log_size_mismatch(
         return
     prefix = f"[{source}] " if source else ""
     logger.warning(
-        "%s输出尺寸与请求不一致: requested=%s got=%s (服务商可能忽略 size)",
+        "%s输出尺寸与请求不一致: requested=%s got=%s",
         prefix,
         want,
         got,

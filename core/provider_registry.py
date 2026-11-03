@@ -163,6 +163,7 @@ class ProviderRegistry:
                 entry.get("ratio_default_sizes") or {}
             ),
             async_mode=str(entry.get("async_mode") or "auto").strip().lower(),
+            async_task=dict(entry.get("async_task") or {}),
             key_cooldown_seconds=max(
                 0,
                 int(

@@ -17,6 +17,17 @@ from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 
+from ..async_task import (
+    TaskSpec,
+    as_text,
+    await_task,
+    build_poll_url,
+    detect_task_id,
+    first_value,
+    has_inline_image,
+    spec_from_config,
+    task_state,
+)
 from ..http import backoff_delay, retry_after_seconds
 from ..logbook import get_logger
 from ..image_format import (
@@ -463,100 +474,84 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
             return data[0]
         return {}
 
-    @staticmethod
-    def _task_id(resp: dict) -> str:
-        item = OpenAICompatBackend._pick_item(resp)
-        for holder in (resp, item):
-            for key in ("task_id", "id"):
-                value = holder.get(key)
-                if value:
-                    text = str(value).strip()
-                    if text.startswith(("api_", "task", "img", "gen")):
-                        return text
+    def _task_spec(self) -> TaskSpec:
+        """Polling dialect for this provider, built once per backend."""
+        cached = getattr(self, "_cached_task_spec", None)
+        if cached is not None:
+            return cached
+        raw = getattr(self.settings, "async_task", None) or self.extra_body.get("async_task")
+        spec = spec_from_config(
+            raw,
+            base_interval=float(self.extra_body.get("poll_interval") or 5),
+            base_timeout=max(60, int(self.settings.timeout or 600)),
+        )
+        self._cached_task_spec = spec
+        return spec
+
+    def _task_id(self, resp: dict) -> str:
+        spec = self._task_spec()
+        # A response that already carries the picture is done, even when the
+        # gateway also echoes a request id.
+        if has_inline_image(resp):
+            return ""
+        task_id = detect_task_id(resp, spec)
+        if not task_id:
+            return ""
+        # A bare "id" is not proof of a queued job: an error body can carry one
+        # too. Treat the response as asynchronous only when something else
+        # points that way — a configured dialect, a reported state, a poll
+        # address, an explicit task field, or the id naming itself a task.
+        if spec.configured or task_state(resp, spec) or self._response_poll_url(resp):
+            return task_id
+        if _has_task_field(resp):
+            return task_id
+        if task_id.startswith(_TASK_ID_PREFIXES):
+            return task_id
         return ""
 
-    def _poll_url(self, resp: dict, task_id: str) -> str:
-        item = self._pick_item(resp)
+    @staticmethod
+    def _response_poll_url(resp: dict) -> str:
+        item = OpenAICompatBackend._pick_item(resp)
         for holder in (resp, item):
             value = str(holder.get("poll_url") or "").strip()
             if value:
                 return value
-        base = root_url(self.base_url)
-        return f"{base}/api/image-tasks?ids={task_id}"
+        return ""
+
+    def _poll_url(self, resp: dict, task_id: str) -> str:
+        explicit = self._response_poll_url(resp)
+        if explicit:
+            return explicit
+        return build_poll_url(self._task_spec(), self.base_url, task_id)
 
     async def _await_task(self, resp: dict, key: str, model: str, size: str) -> ImageResult:
+        spec = self._task_spec()
         task_id = self._task_id(resp)
         if not task_id:
             raise RuntimeError("provider queued the image but returned no task id")
         url = self._poll_url(resp, task_id)
-        interval = float(self.extra_body.get("poll_interval") or 5)
-        deadline = time.monotonic() + max(60, int(self.settings.timeout or 600))
         session = await self._session_get()
         headers = {"Authorization": f"Bearer {key}"}
-        failures = 0
-        while True:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise RuntimeError(f"image task {task_id} timed out")
-            await asyncio_sleep(min(max(1.0, interval), remaining))
-            try:
-                async with session.get(
-                    url, headers=headers, proxy=self.proxy_url or None
-                ) as poll:
-                    body = await poll.read()
-                    if poll.status != 200:
-                        self._handle_key_status(key, poll.status)
-                        raise RuntimeError(f"HTTP {poll.status}: {body[:200].decode('utf-8', 'replace')}")
-                    data = json.loads(body)
-            except Exception as exc:
-                failures += 1
-                if failures > 3:
-                    raise RuntimeError(f"polling task {task_id} failed: {exc}") from exc
-                continue
-            failures = 0
-            state = self._task_state(data)
-            if state in ("failed", "error", "cancelled", "canceled"):
-                raise RuntimeError(f"image task {task_id} {state}")
-            if state in ("success", "succeeded", "completed", "done"):
-                item = self._task_result(data)
-                return await self._extract_image({"data": [item]}, model, size)
 
-    @staticmethod
-    def _task_items(data: dict) -> list[dict]:
-        for key in ("items", "tasks", "data"):
-            value = data.get(key)
-            if isinstance(value, list) and value and isinstance(value[0], dict):
-                return value
-        return [data] if isinstance(data, dict) else []
+        async def fetch(target: str) -> tuple[int, bytes]:
+            async with session.get(target, headers=headers, proxy=self.proxy_url or None) as poll:
+                body = await poll.read()
+                return poll.status, body
 
-    @classmethod
-    def _task_state(cls, data: dict) -> str:
-        for item in cls._task_items(data):
-            for key in ("status", "state"):
-                value = str(item.get(key) or "").strip().lower()
-                if value:
-                    return value
-        return ""
+        def on_status(_task_id: str, status: int) -> None:
+            self._handle_key_status(key, status)
 
-    @classmethod
-    def _task_result(cls, data: dict) -> dict:
-        for item in cls._task_items(data):
-            results = item.get("results") or item.get("images") or item.get("outputs")
-            if isinstance(results, list):
-                for entry in results:
-                    if isinstance(entry, dict) and (entry.get("url") or entry.get("b64_json")):
-                        return entry
-            if item.get("url") or item.get("b64_json") or item.get("image_url"):
-                return item
-            for key in ("result", "output", "data"):
-                value = item.get(key)
-                if isinstance(value, dict) and (value.get("url") or value.get("b64_json")):
-                    return value
-                if isinstance(value, list):
-                    for entry in value:
-                        if isinstance(entry, dict) and (entry.get("url") or entry.get("b64_json")):
-                            return entry
-        raise RuntimeError("image task finished without an image")
+        item = await await_task(
+            fetch=fetch,
+            spec=spec,
+            task_id=task_id,
+            poll_url=url,
+            sleep=asyncio_sleep,
+            clock=time.monotonic,
+            on_status=on_status,
+            logger=logger,
+        )
+        return await self._extract_image({"data": [item]}, model, size)
 
     # -- generate -----------------------------------------------------------
 
@@ -713,6 +708,19 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
 def _mime_of(data: bytes) -> str:
     mime, _ = guess_image_mime_and_ext(data)
     return mime
+
+
+_TASK_ID_PREFIXES = ("api_", "task", "img", "gen")
+
+
+def _has_task_field(payload: dict) -> bool:
+    """True when the body names a task explicitly rather than a generic id."""
+    item = OpenAICompatBackend._pick_item(payload)
+    for holder in (payload, item):
+        for key in ("task_id", "taskId", "task"):
+            if str(holder.get(key) or "").strip():
+                return True
+    return False
 
 
 async def asyncio_sleep(seconds: float) -> None:

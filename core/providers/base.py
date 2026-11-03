@@ -130,6 +130,9 @@ class ProviderSettings:
     allowed_sizes: list[str] = field(default_factory=list)
     ratio_default_sizes: dict[str, str] = field(default_factory=dict)
     async_mode: str = "auto"
+    # Polling dialect for providers that answer a generation request with a
+    # task id; empty means "use the common OpenAI-ish layout".
+    async_task: dict[str, Any] = field(default_factory=dict)
     # Per-key cooldown in seconds: a key that returns 401/403/429 is parked
     # for this long before it can be tried again (0 disables the feature).
     key_cooldown_seconds: int = 300

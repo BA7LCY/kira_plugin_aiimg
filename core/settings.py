@@ -61,6 +61,7 @@ TEMPLATE_CATALOG: tuple[dict[str, Any], ...] = (
             "edit_request_mode",
             "async_mode",
             "poll_interval",
+            "async_task",
             "key_cooldown_seconds",
             "extra_body",
             "proxy_url",
@@ -106,6 +107,7 @@ TEMPLATE_CATALOG: tuple[dict[str, Any], ...] = (
             "edit_request_mode",
             "async_mode",
             "poll_interval",
+            "async_task",
             "key_cooldown_seconds",
             "extra_body",
             "proxy_url",
@@ -290,6 +292,16 @@ FIELD_META: dict[str, dict[str, Any]] = {
         "minimum": 1,
         "maximum": 600,
     },
+    "async_task": {
+        "label": "异步任务格式",
+        "type": "json",
+        "hint": (
+            "服务商的异步任务字段和常见格式不一样时再填。可写 task_id_paths、"
+            "poll_url（用 {task_id} 占位）、state_paths、result_paths、"
+            "success_states、failure_states、interval、timeout。留空按常见格式自动识别。"
+        ),
+        "example": '{"poll_url": "https://api.example.com/v1/tasks/{task_id}"}',
+    },
     "max_retries": {
         "label": "失败重试次数",
         "type": "integer",
@@ -360,7 +372,7 @@ FIELD_META: dict[str, dict[str, Any]] = {
 }
 
 _LIST_FIELDS = ("allowed_sizes",)
-_JSON_FIELDS = ("extra_body", "ratio_default_sizes")
+_JSON_FIELDS = ("extra_body", "ratio_default_sizes", "async_task")
 _INT_RANGES = {
     "timeout": (1, 3600),
     "max_retries": (0, 10),
