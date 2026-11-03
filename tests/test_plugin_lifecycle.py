@@ -478,9 +478,15 @@ def test_preset_lookup_and_apply(plugin_module, tmp_path):
     assert missing == ""
 
 
-def _ref_file(path: Path, data: bytes = b"\x89PNG\r\n\x1a\n") -> Path:
+def _ref_file(path: Path, data: bytes = b"") -> Path:
+    """Write a tiny PNG whose bytes differ per path.
+
+    Reference pictures are de-duplicated by content, so a fixture that reuses
+    one blob for every file would silently collapse into a single reference.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(data)
+    payload = data or (b"\x89PNG\r\n\x1a\n" + path.name.encode("utf-8"))
+    path.write_bytes(payload)
     return path
 
 
@@ -1345,7 +1351,7 @@ async def test_generate_selfie_explains_missing_uploads(plugin_module, tmp_path)
 
 async def test_edit_image_sends_role_filtered_uploads(plugin_module, tmp_path):
     data_dir = tmp_path / "data"
-    base = _ref_file(tmp_path / "base.png")
+    base = _ref_file(data_dir / "refs" / "base.png")
     style = _ref_file(data_dir / "refs" / "style.png")
     _ref_file(data_dir / "refs" / "other.png")
     refs_mod.save_entries(
@@ -1383,7 +1389,9 @@ async def test_edit_image_sends_role_filtered_uploads(plugin_module, tmp_path):
 
 async def test_edit_image_rejects_more_than_eight_references(plugin_module, tmp_path):
     data_dir = tmp_path / "data"
-    base = _ref_file(tmp_path / "base.png")
+    # The picture being edited has to come from somewhere the plugin owns,
+    # otherwise provenance checking refuses it before the count is checked.
+    base = _ref_file(data_dir / "refs" / "base.png")
     entries = []
     for index in range(8):
         _ref_file(data_dir / "refs" / f"style{index}.png")

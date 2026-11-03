@@ -50,6 +50,7 @@ from .core.output_spec import (
     parse_output_intent,
 )
 from .core.prompt import reference_note, render_template
+from .core import refbridge
 from .core.provider_registry import ProviderRegistry
 from .core.provider_stats import ProviderStats
 from .core.providers.base import StopProviderChain
@@ -1114,19 +1115,26 @@ class AIImagePlugin(BasePlugin):
         chain = self._edit_chain()
         if not chain:
             return "未配置支持改图的服务商"
-        extra_refs = self._ref_paths(wanted_roles) if wanted_roles is not None else []
-        for path in message_extras:
-            if len(extra_refs) + 1 >= MAX_REFERENCE_IMAGES:
-                break
-            extra_refs.append((path, "subject"))
+        candidates: list[tuple[Path, str]] = [(Path(input_path), "base")]
+        candidates.extend(
+            (path, role) for path, role in self._ref_paths(wanted_roles)
+        )
+        candidates.extend((path, "subject") for path in message_extras)
+        try:
+            extra_refs, notes = await self._plan_references(event, candidates)
+        except ValueError as exc:
+            return str(exc)
+        for note in notes:
+            logger.info("[aiimg] 改图参考图：%s", note)
+        if not extra_refs or extra_refs[0][1] != "base":
+            return "输入图片来源不明：请把要改的那张图重新发一次"
+        input_path, extra_refs = extra_refs[0][0], extra_refs[1:]
         logger.info(
             "[aiimg] 改图请求：输入图 %s，角色 %s，附带参考图 %d 张",
             Path(input_path).name,
             ",".join(wanted_roles) if wanted_roles is not None else "未指定",
             len(extra_refs),
         )
-        if len(extra_refs) + 1 > MAX_REFERENCE_IMAGES:
-            return self._too_many_references(len(extra_refs) + 1)
         caller_prompt = str(prompt or "")
         prompt, preset_name = self._apply_preset(caller_prompt, preset, "edit")
         extra = self._task_extra(
@@ -1210,8 +1218,21 @@ class AIImagePlugin(BasePlugin):
             if not use_persona:
                 return "还没有可用的自拍参考图：去网页设置里上传参考图片"
             return "还没有可用的自拍参考图：去框架的人设配置里设置参考人像，或在网页设置里改成本地上传"
-        if len(plan) > MAX_REFERENCE_IMAGES:
-            return self._too_many_references(len(plan))
+        persona = await self._persona_reference()
+        try:
+            kept, notes = refbridge.plan_references(
+                plan,
+                gallery_dir=getattr(self._gallery, "gallery_dir", None),
+                refs_dir=self._refs_dir() if self._data_dir is not None else None,
+                persona=persona,
+            )
+        except ValueError as exc:
+            return str(exc)
+        for note in notes:
+            logger.info("[aiimg] 自拍参考图：%s", note)
+        plan = [(item.path, item.role) for item in kept]
+        if not plan:
+            return "没有可用的自拍参考图：参考图片的来源无法确认，请重新上传"
         chain = self._selfie_chain()
         if not chain:
             return self._denied("没有配置可用的生图服务商", "生图")
@@ -1364,6 +1385,18 @@ class AIImagePlugin(BasePlugin):
             # A photo sent with the request is the obvious keyframe.
             attached = await self._first_attached_image(event)
             input_path = str(attached or "")
+        if input_path:
+            # A keyframe is an input picture like any other: refuse a path that
+            # did not come from this message, the gallery or the reference pool.
+            try:
+                kept, notes = await self._plan_references(
+                    event, [(Path(input_path), "base")]
+                )
+            except ValueError as exc:
+                return str(exc)
+            for note in notes:
+                logger.info("[aiimg] 视频关键帧：%s", note)
+            input_path = str(kept[0][0]) if kept else ""
         extra = self._task_extra(
             event,
             seconds=seconds_text,
@@ -1564,8 +1597,8 @@ class AIImagePlugin(BasePlugin):
         return merge_output_intents(*pieces)
 
     @staticmethod
-    def _message_images(event: Any) -> list[Any]:
-        """Images attached to this turn: current message first, replies second.
+    def _message_image_sources(event: Any) -> list[tuple[Any, str]]:
+        """(element, source) pairs: quoted pictures first, then the new ones.
 
         The framework hands plugins a batch event, so the newest message is the
         last entry. Quoted messages carry their own chain, which is where an
@@ -1577,17 +1610,30 @@ class AIImagePlugin(BasePlugin):
             messages.append(single)
         for message in reversed(messages):
             chain = list(getattr(message, "chain", None) or [])
-            quoted: list[Any] = []
+            quoted: list[tuple[Any, str]] = []
             for element in chain:
                 inner = getattr(element, "chain", None)
                 if inner is None or not getattr(element, "message_id", None):
                     continue
-                quoted.extend(item for item in inner if isinstance(item, Image))
-            own = [element for element in chain if isinstance(element, Image)]
+                quoted.extend(
+                    (item, refbridge.SOURCE_QUOTED)
+                    for item in inner
+                    if isinstance(item, Image)
+                )
+            own = [
+                (element, refbridge.SOURCE_MESSAGE)
+                for element in chain
+                if isinstance(element, Image)
+            ]
             found = quoted + own
             if found:
                 return found
         return []
+
+    @staticmethod
+    def _message_images(event: Any) -> list[Any]:
+        """Images attached to this turn: quoted pictures first, own ones second."""
+        return [element for element, _source in AIImagePlugin._message_image_sources(event)]
 
     async def _element_path(self, element: Any) -> Path | None:
         """Materialise an attached image through the framework's own helper."""
@@ -1612,14 +1658,24 @@ class AIImagePlugin(BasePlugin):
 
     async def _attached_paths(self, event: Any, limit: int = _ATTACHMENT_LIMIT) -> list[Path]:
         """Materialise every attached picture, quoted message first."""
-        paths: list[Path] = []
-        for element in self._message_images(event)[:limit]:
+        return [
+            path
+            for path, _source in await self._attached_sources(event, limit=limit)
+        ]
+
+    async def _attached_sources(
+        self, event: Any, limit: int = _ATTACHMENT_LIMIT
+    ) -> list[tuple[Path, str]]:
+        """Attached pictures with where each one came from."""
+        found: list[tuple[Path, str]] = []
+        seen: list[Path] = []
+        for element, source in self._message_image_sources(event)[:limit]:
             path = await self._element_path(element)
-            if path is None:
+            if path is None or path in seen:
                 continue
-            if path not in paths:
-                paths.append(path)
-        return paths
+            seen.append(path)
+            found.append((path, source))
+        return found
 
     async def _gallery_latest(self, event: Any) -> Path | None:
         recent = self._gallery.recent_images(event.sid) if self._gallery else []
@@ -1627,6 +1683,28 @@ class AIImagePlugin(BasePlugin):
             return None
         path = Path(recent[0])
         return path if path.exists() else None
+
+    async def _plan_references(
+        self, event: Any, pairs: list[tuple[Path, str]]
+    ) -> tuple[list[tuple[Path, str]], list[str]]:
+        """Validate provenance, drop duplicates and enforce the byte budget."""
+        attachments = await self._attached_paths(event)
+        quoted = [
+            path
+            for path, source in await self._attached_sources(event)
+            if source == refbridge.SOURCE_QUOTED
+        ]
+        gallery_dir = getattr(self._gallery, "gallery_dir", None)
+        refs_dir = self._refs_dir() if self._data_dir is not None else None
+        planned, notes = refbridge.plan_references(
+            pairs,
+            attachments=attachments,
+            quoted=quoted,
+            gallery_dir=gallery_dir,
+            refs_dir=refs_dir,
+            persona=await self._persona_reference(),
+        )
+        return [(item.path, item.role) for item in planned], notes
 
     async def _resolve_input_image(self, event: KiraMessageBatchEvent, image: str) -> Path | None:
         text = str(image or "").strip()
