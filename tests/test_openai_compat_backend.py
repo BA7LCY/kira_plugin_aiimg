@@ -13,9 +13,16 @@ from core.output_spec import OutputIntent
 from core.providers.base import ProviderSettings
 from core.providers.openai_compat import OpenAICompatBackend
 
-PNG_1PX = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
-)
+def _png_bytes(width: int = 64, height: int = 64) -> bytes:
+    """A real, non-placeholder PNG for the mock server to return."""
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), (90, 120, 200)).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+PNG_1PX = _png_bytes()
 B64_1PX = base64.b64encode(PNG_1PX).decode()
 
 

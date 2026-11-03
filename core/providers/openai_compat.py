@@ -19,7 +19,12 @@ import aiohttp
 
 from ..http import backoff_delay, retry_after_seconds
 from ..logbook import get_logger
-from ..image_format import guess_image_mime_and_ext, validate_image_bytes
+from ..image_format import (
+    guess_image_mime_and_ext,
+    is_placeholder_image,
+    log_size_mismatch,
+    validate_image_bytes,
+)
 from ..net import URLFetchPolicy, ensure_url_allowed
 from ..output_spec import (
     OutputIntent,
@@ -34,7 +39,7 @@ from ..sizes import (
     ratio_defaults_from_sizes,
     size_to_ratio,
 )
-from .base import ImageBackend, ImageResult, ProviderSettings
+from .base import ImageBackend, ImageResult, KeyPoolMixin, ProviderSettings
 
 logger = get_logger("provider.compat")
 
@@ -157,7 +162,7 @@ def _build_collage(images: list[bytes]) -> bytes:
     return out.getvalue()
 
 
-class OpenAICompatBackend(ImageBackend):
+class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
     """HTTP port of the OpenAI-compatible images backend."""
 
     _COOLDOWN_SECONDS = 600
@@ -193,7 +198,7 @@ class OpenAICompatBackend(ImageBackend):
                     self._ratio_defaults[r] = s
 
         self._policy = policy or URLFetchPolicy()
-        self._key_index = 0
+        self._init_key_pool(settings)
         self._generate_disabled_until = 0.0
         self._edit_disabled_until = 0.0
         self.async_mode = str(settings.async_mode or "auto").strip().lower()
@@ -215,12 +220,14 @@ class OpenAICompatBackend(ImageBackend):
 
     # -- helpers ------------------------------------------------------------
 
+    def _key_pool(self) -> list[str]:
+        return self.api_keys
+
+    def _key_logger(self):
+        return logger
+
     def _next_key(self) -> str:
-        if not self.api_keys:
-            raise RuntimeError("provider has no API key configured")
-        key = self.api_keys[self._key_index]
-        self._key_index = (self._key_index + 1) % len(self.api_keys)
-        return key
+        return self._pick_key()
 
     @staticmethod
     def _supports_multiple_images(model: str) -> bool:
@@ -339,6 +346,7 @@ class OpenAICompatBackend(ImageBackend):
                     if not body:
                         return {}
                     return json.loads(body)
+                self._handle_key_status(key, resp.status)
                 detail = body[:300].decode("utf-8", errors="replace")
                 error = RuntimeError(f"HTTP {resp.status}: {detail}")
                 if resp.status in {408, 429, 500, 502, 503, 504} and attempt < retries:
@@ -383,6 +391,7 @@ class OpenAICompatBackend(ImageBackend):
                     if not body:
                         return {}
                     return json.loads(body)
+                self._handle_key_status(key, resp.status)
                 detail = body[:300].decode("utf-8", errors="replace")
                 error = RuntimeError(f"HTTP {resp.status}: {detail}")
                 if resp.status in {408, 429, 500, 502, 503, 504} and attempt < retries:
@@ -428,6 +437,10 @@ class OpenAICompatBackend(ImageBackend):
             raw = await self._download(str(url))
         if raw is None:
             raise RuntimeError("provider response contains no image")
+        if is_placeholder_image(raw):
+            logger.warning("[OpenAICompat] 服务商返回了占位图（%dB），丢弃", len(raw))
+            raise RuntimeError("服务商返回了占位图，无法使用")
+        log_size_mismatch(logger, raw, requested_size=size, source="OpenAICompat")
         mime, ext = guess_image_mime_and_ext(raw)
         return ImageResult(data=raw, mime=mime, ext=ext, size=size, model=model)
 
@@ -484,6 +497,7 @@ class OpenAICompatBackend(ImageBackend):
                 ) as poll:
                     body = await poll.read()
                     if poll.status != 200:
+                        self._handle_key_status(key, poll.status)
                         raise RuntimeError(f"HTTP {poll.status}: {body[:200].decode('utf-8', 'replace')}")
                     data = json.loads(body)
             except Exception as exc:

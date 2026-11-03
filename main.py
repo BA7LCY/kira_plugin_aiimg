@@ -35,6 +35,7 @@ from core.prompt_manager import Prompt
 from .core import refs as refs_mod
 from .core import settings as settings_mod
 from .core.chains import ChainItem, chain_for
+from .core.debounce import Debouncer
 from .core.image_store import ImageStore
 from .core.image_format import validate_image_bytes
 from .core.logbook import clip, elapsed_ms, mask
@@ -64,6 +65,7 @@ TOOL_NAMES = (
     "generate_image_batch",
     "generate_video",
     "get_task_status",
+    "resend_image",
 )
 
 IMAGE_KINDS = ("generate_image", "edit_image", "generate_selfie", "generate_image_batch")
@@ -215,6 +217,8 @@ class AIImagePlugin(BasePlugin):
         self._config_lock = asyncio.Lock()
         self._ready = False
         self._builtin_tags_logged = False
+        # Collapses an identical request repeated within a few seconds.
+        self._debounce = Debouncer(0.0)
         # Turns that submitted a task and still owe the user an acknowledgement.
         self._ack_watch: dict[int, dict[str, Any]] = {}
 
@@ -225,6 +229,9 @@ class AIImagePlugin(BasePlugin):
     async def initialize(self):
         self._data_dir = self.ctx.get_plugin_data_dir()
         self._data_dir.mkdir(parents=True, exist_ok=True)
+        self._debounce.configure(
+            float(self._cfg("section_queue", "debounce_seconds", default=3) or 0)
+        )
         self._stats = ProviderStats(self._data_dir)
         self._configure_stats()
         self._store = TaskStore(self._data_dir)
@@ -679,6 +686,47 @@ class AIImagePlugin(BasePlugin):
         extra.update(values)
         return extra
 
+    def _duplicate_task(
+        self, event: Any, kind: str, prompt: str, extra: dict, *, input_path: str = ""
+    ) -> str:
+        """Return the task id of an identical request sent moments ago, or ""."""
+        if not self._debounce.enabled:
+            return ""
+        key = self._debounce.make_key(
+            self._user_id(event),
+            self._group_id(event),
+            kind,
+            str(prompt or "").strip(),
+            input_path,
+            json.dumps(extra.get("explicit") or {}, sort_keys=True),
+            extra.get("default_output") or "",
+            (extra.get("chain_items") or [{}])[0].get("output")
+            if extra.get("chain_items")
+            else "",
+        )
+        existing = self._debounce.duplicate_of(key)
+        if existing:
+            logger.info("[aiimg] 重复请求合并：%s 复用任务 %s", kind, existing)
+        return existing
+
+    def _remember_task(self, event: Any, kind: str, prompt: str, extra: dict, task_id: str,
+                       *, input_path: str = "") -> None:
+        if not self._debounce.enabled:
+            return
+        key = self._debounce.make_key(
+            self._user_id(event),
+            self._group_id(event),
+            kind,
+            str(prompt or "").strip(),
+            input_path,
+            json.dumps(extra.get("explicit") or {}, sort_keys=True),
+            extra.get("default_output") or "",
+            (extra.get("chain_items") or [{}])[0].get("output")
+            if extra.get("chain_items")
+            else "",
+        )
+        self._debounce.remember(key, task_id)
+
     async def _queue_image_task(
         self,
         event: KiraMessageBatchEvent,
@@ -719,6 +767,9 @@ class AIImagePlugin(BasePlugin):
             extra["preset"] = preset
             extra["preset_text"] = preset_text
             extra["caller_prompt"] = caller_prompt or prompt
+        duplicate = self._duplicate_task(event, kind, prompt, extra)
+        if duplicate:
+            return self._duplicate_ack(duplicate, "已加入生图队列", event)
         record = self._store.create(
             kind=kind,
             sid=event.sid,
@@ -733,7 +784,23 @@ class AIImagePlugin(BasePlugin):
             await self._submit(record, self._run_generate)
         except (QueueFullError, UserLimitError) as exc:
             return str(exc)
+        self._remember_task(event, kind, prompt, extra, record.task_id)
         return self._ack_text(record, "已加入生图队列", event)
+
+    def _duplicate_ack(self, task_id: str, message: str, event: Any) -> str:
+        """Acknowledge a collapsed duplicate without queueing a second task."""
+        record = self._store.get(task_id) if self._store else None
+        if record is not None:
+            return self._ack_text(record, f"{message}（同一条请求正在处理）", event)
+        return json.dumps(
+            {
+                "status": "accepted",
+                "task_id": task_id,
+                "state": "duplicate",
+                "summary": f"{message}（同一条请求正在处理）",
+            },
+            ensure_ascii=False,
+        )
 
     async def _submit(
         self,
@@ -1280,6 +1347,84 @@ class AIImagePlugin(BasePlugin):
         else:
             lines.append("暂无任务")
         return "\n".join(lines)
+
+    @register.tool(
+        name="resend_image",
+        description="重新发送上一次生成的图片或视频，不重新生成。用户说“再发一次”“刚才那张再给我看看”或图片没收到时用它。不传 task_id 时取该用户最近一次成功的任务。",
+        params={
+            "type": "object",
+            "properties": {
+                "task_id": {"type": "string", "description": "任务编号，留空用最近一次成功的任务"},
+            },
+            "required": [],
+        },
+    )
+    async def resend_image(self, event: KiraMessageBatchEvent, task_id: str = "") -> str:
+        if not self._ready or not self._store:
+            return "插件未就绪"
+        user_id = self._user_id(event)
+        record = self._latest_media_task(user_id, task_id)
+        if record is None:
+            return "还没有生成过图片，先让我画一张吧"
+        elements = self._media_elements(record)
+        if not elements:
+            return f"任务 {record.task_id} 没有可重发的图片或视频"
+        await self._safe_send(event.sid, MessageChain(elements))
+        self._mark_ack_delivered(record.task_id)
+        logger.info(
+            "[aiimg] 重发任务 %s 的 %d 个元素到 %s",
+            record.task_id,
+            len(elements),
+            event.sid,
+        )
+        return json.dumps(
+            {
+                "status": "resent",
+                "task_id": record.task_id,
+                "kind": record.kind,
+                "count": len(elements),
+                "summary": "已重新发送上次的结果",
+            },
+            ensure_ascii=False,
+        )
+
+    def _latest_media_task(self, user_id: str, task_id: str = "") -> TaskRecord | None:
+        """Find a succeeded task that still has deliverable media."""
+        if task_id:
+            record = self._store.get(task_id.strip()) if self._store else None
+            if record is None:
+                return None
+            if record.user_id and record.user_id != user_id:
+                return None
+            return record if self._media_elements(record) else None
+        for record in self._store.list_recent(limit=40):
+            if record.status != "succeeded":
+                continue
+            if record.user_id and record.user_id != user_id:
+                continue
+            if self._media_elements(record):
+                return record
+        return None
+
+    def _media_elements(self, record: TaskRecord) -> list[Any]:
+        """Rebuild the media chain of a finished task from its stored result."""
+        try:
+            payload = json.loads(record.result or "{}")
+        except Exception:
+            payload = {}
+        elements: list[Any] = []
+        video_url = str(payload.get("url") or "").strip()
+        if video_url:
+            elements.append(Video(file=video_url))
+        for path in payload.get("media") or []:
+            text = str(path or "").strip()
+            if not text:
+                continue
+            if text.lower().endswith((".mp4", ".webm", ".mov")):
+                elements.append(Video(file=text))
+            else:
+                elements.append(Image(image=text))
+        return elements
 
     # ------------------------------------------------------------------
     # shared tool plumbing

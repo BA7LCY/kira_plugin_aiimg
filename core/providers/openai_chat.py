@@ -27,13 +27,15 @@ from ..image_format import (
     decode_base64_image,
     guess_image_mime_and_ext,
     image_data_url,
+    is_placeholder_image,
+    log_size_mismatch,
     validate_image_bytes,
 )
 from ..net import URLFetchPolicy, ensure_url_allowed
 from ..output_spec import OutputIntent, is_gpt_image_2_model
 from ..prompt import render_template
 from ..sizes import normalize_size_text
-from .base import ImageBackend, ImageResult, ProviderSettings
+from .base import ImageBackend, ImageResult, KeyPoolMixin, ProviderSettings
 from .openai_compat import OpenAICompatBackend, normalize_openai_compat_base_url
 
 _MARKDOWN_IMAGE_RE = re.compile(r"!\[.*?\]\((.*?)\)")
@@ -48,6 +50,22 @@ _JSON_URL_FIELD_RE = re.compile(
 )
 _BASE64_PREFIX_RE = re.compile(r"^(?:b64|base64)\s*:\s*", re.IGNORECASE)
 _LOCAL_MEDIA_HOSTS = {"0.0.0.0", "127.0.0.1", "localhost", "host.docker.internal"}
+
+# Error markers that indicate the model does not support chat-completions
+# for image generation and should fall back to the images API.
+_FALLBACK_MARKERS = (
+    "unsupported protocol scheme",
+    "unsupported url scheme",
+    "get file base64 from url",
+    "image_url is required",
+    "does not support chat completions",
+    "chat completions not supported",
+    "not a chat model",
+    "image generation model",
+    "does not support chat",
+    "use images api",
+    "images/generations",
+)
 _REQUEST_MODE_ALIASES = {
     "auto": "auto",
     "stream": "stream",
@@ -513,7 +531,7 @@ def _aspect_from_size(size: str | None) -> str | None:
 
 logger = get_logger("provider.chat")
 
-class OpenAIChatImageBackend(ImageBackend):
+class OpenAIChatImageBackend(KeyPoolMixin, ImageBackend):
     """chat.completions image backend over aiohttp."""
 
     def __init__(self, settings: ProviderSettings, *, policy: URLFetchPolicy | None = None):
@@ -539,7 +557,8 @@ class OpenAIChatImageBackend(ImageBackend):
         if not self.edit_request_mode:
             self.edit_request_mode = "stream" if settings.enable_stream_edit else "auto"
         self._policy = policy or URLFetchPolicy()
-        self._key_index = 0
+        self._init_key_pool(settings)
+        self._cached_fallback: OpenAICompatBackend | None = None
         self._session: aiohttp.ClientSession | None = None
 
     # -- session ------------------------------------------------------------
@@ -559,9 +578,13 @@ class OpenAIChatImageBackend(ImageBackend):
     def _next_key(self) -> str:
         if not self.api_keys:
             raise RuntimeError("provider has no API key configured")
-        key = self.api_keys[self._key_index]
-        self._key_index = (self._key_index + 1) % len(self.api_keys)
-        return key
+        return self._pick_key()
+
+    def _key_pool(self) -> list[str]:
+        return self.api_keys
+
+    def _key_logger(self):
+        return logger
 
     def _should_try_stream(self, operation: str) -> bool:
         mode = self.generate_request_mode if operation == "generate" else self.edit_request_mode
@@ -646,6 +669,7 @@ class OpenAIChatImageBackend(ImageBackend):
             ) as resp:
                 body = await resp.read()
                 if resp.status not in range(200, 300):
+                    self._handle_key_status(key, resp.status)
                     detail = body[:300].decode("utf-8", errors="replace")
                     error = RuntimeError(f"HTTP {resp.status}: {detail}")
                     if resp.status in {408, 429, 500, 502, 503, 504} and attempt < self.max_retries:
@@ -722,6 +746,10 @@ class OpenAIChatImageBackend(ImageBackend):
             raw = await self._download(ref)
         else:
             raise RuntimeError(f"unsupported image reference: {ref[:80]!r}")
+        if is_placeholder_image(raw):
+            logger.warning("[OpenAIChat] 服务商返回了占位图（%dB），丢弃", len(raw))
+            raise RuntimeError("服务商返回了占位图，无法使用")
+        log_size_mismatch(logger, raw, requested_size=size, source="OpenAIChat")
         mime, ext = guess_image_mime_and_ext(raw)
         return ImageResult(data=raw, mime=mime, ext=ext, size=size, model=model)
 
@@ -795,16 +823,29 @@ class OpenAIChatImageBackend(ImageBackend):
                     extra_body=extra_body,
                     stream=True,
                 )
-            except Exception:
+            except Exception as exc:
                 refs = []
+                if self._should_fallback(str(exc)):
+                    return await self._fallback_generate(
+                        prompt, intent=intent, size_hint=size_hint,
+                        model=model, extra=extra,
+                    )
         if not refs:
-            refs = await self._post_chat(
-                key=key,
-                model=final_model,
-                messages=[{"role": "user", "content": user_text}],
-                extra_body=extra_body,
-                stream=False,
-            )
+            try:
+                refs = await self._post_chat(
+                    key=key,
+                    model=final_model,
+                    messages=[{"role": "user", "content": user_text}],
+                    extra_body=extra_body,
+                    stream=False,
+                )
+            except Exception as exc:
+                if self._should_fallback(str(exc)):
+                    return await self._fallback_generate(
+                        prompt, intent=intent, size_hint=size_hint,
+                        model=model, extra=extra,
+                    )
+                raise
         if not refs:
             raise RuntimeError(
                 "chat response contained no image (need markdown image, "
@@ -812,6 +853,37 @@ class OpenAIChatImageBackend(ImageBackend):
             )
         result = await self._save_from_refs(refs, model=final_model, size=size or self.default_size)
         return [result]
+
+    def _should_fallback(self, error_text: str) -> bool:
+        """Return True if the error suggests falling back to the images API."""
+        lower = error_text.lower()
+        return any(marker in lower for marker in _FALLBACK_MARKERS)
+
+    async def _fallback_backend(self) -> OpenAICompatBackend:
+        """Lazy-create an images-API backend using the same settings."""
+        if self._cached_fallback is None:
+            self._cached_fallback = OpenAICompatBackend(
+                self.settings, policy=self._policy,
+            )
+        return self._cached_fallback
+
+    async def _fallback_generate(
+        self, prompt: str, *, intent, size_hint, model, extra,
+    ) -> list[ImageResult]:
+        backend = await self._fallback_backend()
+        return await backend.generate(
+            prompt, intent=intent, size_hint=size_hint,
+            model=model, extra=extra,
+        )
+
+    async def _fallback_edit(
+        self, prompt: str, images: list[Path], *, intent, size_hint, model, extra,
+    ) -> list[ImageResult]:
+        backend = await self._fallback_backend()
+        return await backend.edit(
+            prompt, images, intent=intent, size_hint=size_hint,
+            model=model, extra=extra,
+        )
 
     # -- edit ---------------------------------------------------------------
 
@@ -882,6 +954,11 @@ class OpenAIChatImageBackend(ImageBackend):
                 )
             except Exception as exc:
                 stream_error = exc
+                if self._should_fallback(str(exc)):
+                    return await self._fallback_edit(
+                        prompt, images, intent=intent,
+                        size_hint=size_hint, model=model, extra=extra,
+                    )
                 refs = []
         if not refs:
             try:
@@ -893,6 +970,11 @@ class OpenAIChatImageBackend(ImageBackend):
                     stream=False,
                 )
             except Exception as exc:
+                if self._should_fallback(str(exc)):
+                    return await self._fallback_edit(
+                        prompt, images, intent=intent,
+                        size_hint=size_hint, model=model, extra=extra,
+                    )
                 if stream_error is not None:
                     raise RuntimeError(
                         f"chat edit failed: {exc} (stream also failed: {stream_error})"

@@ -161,6 +161,14 @@ class ProviderRegistry:
                 entry.get("ratio_default_sizes") or {}
             ),
             async_mode=str(entry.get("async_mode") or "auto").strip().lower(),
+            key_cooldown_seconds=max(
+                0,
+                int(
+                    entry.get("key_cooldown_seconds")
+                    if entry.get("key_cooldown_seconds") is not None
+                    else 300
+                ),
+            ),
         )
 
         if template_key == "openai_images" and not settings.allowed_sizes:

@@ -61,6 +61,7 @@ TEMPLATE_CATALOG: tuple[dict[str, Any], ...] = (
             "edit_request_mode",
             "async_mode",
             "poll_interval",
+            "key_cooldown_seconds",
             "extra_body",
             "proxy_url",
             "timeout",
@@ -81,6 +82,7 @@ TEMPLATE_CATALOG: tuple[dict[str, Any], ...] = (
             "prompt_template",
             "generate_request_mode",
             "edit_request_mode",
+            "key_cooldown_seconds",
             "extra_body",
             "proxy_url",
             "timeout",
@@ -104,6 +106,7 @@ TEMPLATE_CATALOG: tuple[dict[str, Any], ...] = (
             "edit_request_mode",
             "async_mode",
             "poll_interval",
+            "key_cooldown_seconds",
             "extra_body",
             "proxy_url",
             "timeout",
@@ -347,6 +350,13 @@ FIELD_META: dict[str, dict[str, Any]] = {
         "minimum": 1,
         "maximum": 600,
     },
+    "key_cooldown_seconds": {
+        "label": "密钥冷却(秒)",
+        "type": "integer",
+        "hint": "密钥被服务商拒绝（401/403）后暂时停用多久，0 不冷却。默认 300。",
+        "minimum": 0,
+        "maximum": 86400,
+    },
 }
 
 _LIST_FIELDS = ("allowed_sizes",)
@@ -361,9 +371,13 @@ _INT_RANGES = {
     "timeout_seconds": (120, 7200),
     "request_timeout_seconds": (10, 300),
     "poll_interval_seconds": (1, 600),
+    "key_cooldown_seconds": (0, 86400),
 }
 _INT_FIELDS = tuple(_INT_RANGES)
 _PROVIDER_INT_FIELDS = _INT_FIELDS
+# Integer provider fields that live in the raw entry but are not driven by
+# the settings form; they still pass through normalization and validation.
+_PROVIDER_INT_EXTRAS: tuple[str, ...] = ()
 _PROVIDER_STR_FIELDS = (
     "base_url",
     "model",
@@ -611,6 +625,7 @@ def provider_defaults(template_key: str) -> dict[str, Any]:
                 "edit_request_mode": "auto",
                 "async_mode": "auto",
                 "poll_interval": 5,
+                "key_cooldown_seconds": 300,
                 "prompt_template": (
                     CHAT_PROMPT_TEMPLATE if template_key == "openai_chat" else ""
                 ),
@@ -754,6 +769,16 @@ def normalize_provider(raw: Any, index: int) -> dict[str, Any]:
             raise ValueError(
                 f"服务商「{provider_id}」的{field_label(field)}要在 {minimum} 到 {maximum} 之间"
             )
+        result[field] = value
+
+    for field in _PROVIDER_INT_EXTRAS:
+        if field not in raw:
+            continue
+        value = raw.get(field)
+        if value is None or value == "":
+            continue
+        if type(value) is not int or value < 0:
+            raise ValueError(f"服务商「{provider_id}」的{field_label(field)}需要填非负整数")
         result[field] = value
 
     supports_edit = raw.get("supports_edit", entry["kind"] == "image")

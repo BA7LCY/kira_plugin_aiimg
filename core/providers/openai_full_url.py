@@ -16,12 +16,14 @@ from ..logbook import get_logger
 from ..image_format import (
     decode_base64_image,
     guess_image_mime_and_ext,
+    is_placeholder_image,
+    log_size_mismatch,
     validate_image_bytes,
 )
 from ..net import URLFetchPolicy, ensure_url_allowed
 from ..output_spec import OutputIntent, size_from_ratio_and_resolution
 from ..sizes import normalize_size_text
-from .base import ImageBackend, ImageResult, ProviderSettings
+from .base import ImageBackend, ImageResult, KeyPoolMixin, ProviderSettings
 
 logger = get_logger("provider.full_url")
 
@@ -89,7 +91,7 @@ def _extract_image_ref(obj, depth: int = 0) -> str | None:
     return None
 
 
-class OpenAIFullURLBackend(ImageBackend):
+class OpenAIFullURLBackend(KeyPoolMixin, ImageBackend):
     """POSTs a JSON body to a configured endpoint and extracts the image."""
 
     def __init__(self, settings: ProviderSettings, *, policy: URLFetchPolicy | None = None):
@@ -106,6 +108,7 @@ class OpenAIFullURLBackend(ImageBackend):
         self.full_edit_url = str(settings.full_edit_url or "").strip()
         self.edit_model = str(settings.edit_model or "").strip()
         self._policy = policy or URLFetchPolicy()
+        self._init_key_pool(settings)
         self._session: aiohttp.ClientSession | None = None
 
     async def _session_get(self) -> aiohttp.ClientSession:
@@ -119,20 +122,29 @@ class OpenAIFullURLBackend(ImageBackend):
             await self._session.close()
         self._session = None
 
-    def _headers(self) -> dict:
+    def _headers(self, key: str) -> dict:
         headers = {"Content-Type": "application/json"}
-        keys = [k for k in (self.settings.api_keys or []) if str(k).strip()]
-        if keys:
-            headers["Authorization"] = f"Bearer {keys[0]}"
+        if key:
+            headers["Authorization"] = f"Bearer {key}"
         return headers
+
+    def _key_pool(self) -> list[str]:
+        return [k for k in (self.settings.api_keys or []) if str(k).strip()]
+
+    def _key_logger(self):
+        return logger
+
+    def _next_key(self) -> str:
+        return self._pick_key()
 
     async def _post_json(self, url: str, payload: dict) -> dict | str:
         session = await self._session_get()
         attempt = 0
         while True:
+            key = self._next_key()
             async with session.post(
                 url,
-                headers=self._headers(),
+                headers=self._headers(key),
                 json=payload,
                 proxy=self.proxy_url or None,
             ) as resp:
@@ -154,6 +166,7 @@ class OpenAIFullURLBackend(ImageBackend):
                     except Exception:
                         return {}
                 detail = body[:300].decode("utf-8", errors="replace")
+                self._handle_key_status(key, resp.status)
                 error = RuntimeError(f"HTTP {resp.status}: {detail}")
                 if resp.status in {408, 429, 500, 502, 503, 504} and attempt < self.max_retries:
                     retry_after = retry_after_seconds(resp.headers.get("Retry-After"))
@@ -212,6 +225,10 @@ class OpenAIFullURLBackend(ImageBackend):
             data = await self._download(self._rewrite_loopback_ref(raw, endpoint))
         else:
             raise RuntimeError("provider response contains no readable image reference")
+        if is_placeholder_image(data):
+            logger.warning("[FullURL] 服务商返回了占位图（%dB），丢弃", len(data))
+            raise RuntimeError("服务商返回了占位图，无法使用")
+        log_size_mismatch(logger, data, requested_size=size, source="FullURL")
         mime, ext = guess_image_mime_and_ext(data)
         return ImageResult(data=data, mime=mime, ext=ext, size=size, model=model)
 
