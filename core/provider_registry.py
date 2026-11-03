@@ -60,10 +60,12 @@ class ProviderRegistry:
         *,
         data_dir: Path,
         policy: URLFetchPolicy | None = None,
+        image_max_bytes: int | None = None,
     ):
         self._config = config or {}
         self._data_dir = Path(data_dir)
         self._policy = policy or URLFetchPolicy()
+        self._image_max_bytes = image_max_bytes
         self._image: dict[str, ProviderSettings] = {}
         self._video: dict[str, ProviderSettings] = {}
         self._image_backends: dict[str, ImageBackend] = {}
@@ -238,11 +240,17 @@ class ProviderRegistry:
         backend = self._image_backends.get(provider_id)
         if backend is None:
             if settings.template_key == "openai_chat":
-                backend = OpenAIChatImageBackend(settings, policy=self._policy)
+                backend = OpenAIChatImageBackend(
+                    settings, policy=self._policy, image_max_bytes=self._image_max_bytes
+                )
             elif settings.template_key == "openai_full_url_images":
-                backend = OpenAIFullURLBackend(settings, policy=self._policy)
+                backend = OpenAIFullURLBackend(
+                    settings, policy=self._policy, image_max_bytes=self._image_max_bytes
+                )
             else:
-                backend = OpenAICompatBackend(settings, policy=self._policy)
+                backend = OpenAICompatBackend(
+                    settings, policy=self._policy, image_max_bytes=self._image_max_bytes
+                )
             self._image_backends[provider_id] = backend
         return backend
 

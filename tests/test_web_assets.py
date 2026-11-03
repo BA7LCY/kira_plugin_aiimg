@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 import subprocess
 from pathlib import Path
@@ -10,9 +11,50 @@ import pytest
 
 WEB_DIR = Path(__file__).resolve().parent.parent / "web"
 
+# Older node builds refuse to syntax-check an .mjs file ("Cannot use import
+# statement outside a module"); this helper parses it as a real module instead.
+_VM_CHECKER = """
+const fs = require('fs');
+const vm = require('vm');
+let failed = false;
+for (const file of process.argv.slice(2)) {
+  try {
+    new vm.SourceTextModule(fs.readFileSync(file, 'utf8'), { identifier: file });
+  } catch (err) {
+    console.error(`${file}: ${err.message}`);
+    failed = true;
+  }
+}
+process.exit(failed ? 1 : 0);
+"""
+
 
 def _node():
     return shutil.which("node")
+
+
+def _parse_error(node: str, target: Path, tmp_path: Path) -> str:
+    """Return the parse error for a script, or an empty string when it is fine."""
+    result = subprocess.run(
+        [node, "--check", str(target)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if result.returncode == 0:
+        return ""
+    # The page scripts are ES modules; node's CJS syntax check rejects those.
+    helper = tmp_path / "check-module.cjs"
+    helper.write_text(_VM_CHECKER, encoding="utf-8")
+    module = subprocess.run(
+        [node, "--experimental-vm-modules", str(helper), str(target)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if module.returncode == 0:
+        return ""
+    return (module.stderr.strip() or module.stdout.strip() or result.stderr.strip())
 
 
 def test_scripts_parse(tmp_path):
@@ -23,13 +65,8 @@ def test_scripts_parse(tmp_path):
         source = WEB_DIR / name
         target = tmp_path / f"{source.stem}-check.mjs"
         target.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
-        result = subprocess.run(
-            [node, "--check", str(target)],
-            capture_output=True,
-            text=True,
-            timeout=60,
-        )
-        assert result.returncode == 0, f"{name}: {result.stderr.strip()}"
+        error = _parse_error(node, target, tmp_path)
+        assert not error, f"{name}: {error}"
 
 
 def test_page_references_existing_assets():
@@ -196,4 +233,41 @@ def test_tasks_page_filters_and_retries_failed_jobs():
     assert '"data-action": "task-retry"' in script
     assert "/tasks/${encodeURIComponent(taskId)}/retry" in script
     assert "已重新入队" in script
+
+
+def test_api_keys_offer_bulk_paste():
+    script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    css = (WEB_DIR / "app.css").read_text(encoding="utf-8")
+
+    assert "function openKeysBulk()" in script
+    assert '"data-action": "keys-bulk"' in script
+    assert "if (action === \"keys-bulk\")" in script
+    assert "每行一把密钥" in script
+    # Duplicates collapse instead of piling up in the pool.
+    assert "const seen = new Set(existing);" in script
+    for selector in (".keys-row", ".keys-bulk-area"):
+        assert selector in css
+
+
+def test_advanced_section_exposes_network_and_encoding_knobs():
+    schema = json.loads((WEB_DIR.parent / "schema.json").read_text(encoding="utf-8"))
+    fields = schema["section_advanced"]["fields"]
+
+    for name in (
+        "download_timeout_seconds",
+        "image_max_mb",
+        "video_max_mb",
+        "trusted_result_origins",
+        "allow_private_result_origins",
+        "thumb_width",
+        "thumb_quality",
+        "thumb_format",
+        "preview_size",
+        "preview_quality",
+        "preview_format",
+    ):
+        assert name in fields, f"missing advanced field: {name}"
+    assert schema["section_advanced"]["collapsed"] is True
+    assert fields["thumb_format"]["options"] == ["webp", "jpeg"]
+    assert fields["preview_format"]["options"] == ["jpeg", "webp"]
 

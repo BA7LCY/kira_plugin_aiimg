@@ -34,6 +34,9 @@ class ImageStore:
         self.preview_dir = self.data_dir / "previews"
         self.preview_dir.mkdir(parents=True, exist_ok=True)
         self._config = config or {}
+        params = self._encoding_params()
+        self._thumb_format = params["thumb_format"]
+        self._preview_format = params["preview_format"]
         self._lock = threading.Lock()
         self._db = sqlite3.connect(
             self.data_dir / "gallery.sqlite3",
@@ -79,6 +82,9 @@ class ImageStore:
     def update_config(self, config: dict) -> None:
         """Swap retention/capacity rules after a settings change."""
         self._config = config or {}
+        params = self._encoding_params()
+        self._thumb_format = params["thumb_format"]
+        self._preview_format = params["preview_format"]
 
     def _execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         with self._lock:
@@ -293,22 +299,55 @@ class ImageStore:
 
     def thumb_path(self, image_id: str) -> Path:
         safe = "".join(ch for ch in str(image_id) if ch.isalnum() or ch in "-_")
-        return self.thumb_dir / f"{safe or 'image'}.webp"
+        fmt = str(self._thumb_format or "webp").lower()
+        suffix = ".jpeg" if fmt == "jpeg" else ".webp"
+        return self.thumb_dir / f"{safe or 'image'}{suffix}"
 
     def preview_path(self, image_id: str) -> Path:
         safe = "".join(ch for ch in str(image_id) if ch.isalnum() or ch in "-_")
-        return self.preview_dir / f"{safe or 'image'}.jpg"
+        fmt = str(self._preview_format or "jpeg").lower()
+        suffix = ".webp" if fmt == "webp" else ".jpg"
+        return self.preview_dir / f"{safe or 'image'}{suffix}"
+
+    def encoding_params(self) -> dict:
+        """Public view of the advanced encoding knobs."""
+        return self._encoding_params()
+
+    def _encoding_params(self) -> dict:
+        """Read the advanced encoding knobs from the stored config."""
+        advanced = self._config.get("advanced", {})
+        if not isinstance(advanced, dict):
+            advanced = {}
+        return {
+            "thumb_size": int(advanced.get("thumb_width") or 480),
+            "thumb_quality": int(advanced.get("thumb_quality") or 82),
+            "thumb_format": str(advanced.get("thumb_format") or "webp"),
+            "preview_size": int(advanced.get("preview_size") or 2048),
+            "preview_quality": int(advanced.get("preview_quality") or 90),
+            "preview_format": str(advanced.get("preview_format") or "jpeg"),
+        }
 
     def write_derivatives(self, image_id: str, data: bytes) -> None:
         """Write the small grid thumb and the mid-size preview beside the id."""
+        params = self._encoding_params()
         try:
-            thumb = thumbnail_webp(data)
+            thumb = thumbnail_webp(
+                data,
+                size=params["thumb_size"],
+                quality=params["thumb_quality"],
+                fmt=params["thumb_format"],
+            )
             if thumb is not data and thumb:
                 self._atomic_write(self.thumb_path(image_id), thumb)
         except Exception:
             pass
         try:
-            preview = preview_jpeg(data)
+            preview = preview_jpeg(
+                data,
+                size=params["preview_size"],
+                quality=params["preview_quality"],
+                fmt=params["preview_format"],
+            )
             if preview is not data and preview:
                 self._atomic_write(self.preview_path(image_id), preview)
         except Exception:

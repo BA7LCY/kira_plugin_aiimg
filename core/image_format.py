@@ -21,11 +21,12 @@ def guess_image_mime_and_ext(image_bytes: bytes) -> tuple[str, str]:
     return "image/jpeg", "jpg"
 
 
-def validate_image_bytes(data: bytes) -> None:
+def validate_image_bytes(data: bytes, max_bytes: int | None = None) -> None:
+    cap = max_bytes if max_bytes else 24 * 1024 * 1024
     if not data:
         raise ValueError("图片内容为空")
-    if len(data) > 24 * 1024 * 1024:
-        raise ValueError("图片超过 24 MB")
+    if len(data) > cap:
+        raise ValueError(f"图片超过 {cap // (1024 * 1024)} MB")
     try:
         from PIL import Image as PILImage
 
@@ -126,29 +127,45 @@ def log_size_mismatch(
     )
 
 
-def thumbnail_webp(data: bytes, size: int = 480, quality: int = 82) -> bytes:
-    """Downscale image bytes to a small WebP; return the input on failure."""
+def thumbnail_webp(
+    data: bytes, size: int = 480, quality: int = 82, fmt: str = "webp"
+) -> bytes:
+    """Downscale image bytes to a small preview; return the input on failure.
+
+    `fmt` may be "webp" or "jpeg"; the filename suffix should match.
+    """
     try:
         from PIL import Image as PILImage
 
         with PILImage.open(io.BytesIO(data)) as image:
             image.thumbnail((size, size))
             output = io.BytesIO()
-            image.convert("RGB").save(output, format="WEBP", quality=quality)
+            if str(fmt).lower() == "jpeg":
+                image.convert("RGB").save(output, format="JPEG", quality=quality)
+            else:
+                image.convert("RGB").save(output, format="WEBP", quality=quality)
             return output.getvalue()
     except Exception:
         return data
 
 
-def preview_jpeg(data: bytes, size: int = 2048, quality: int = 90) -> bytes:
-    """Downscale image bytes to a viewing JPEG; return the input on failure."""
+def preview_jpeg(
+    data: bytes, size: int = 2048, quality: int = 90, fmt: str = "jpeg"
+) -> bytes:
+    """Downscale image bytes to a viewing preview; return the input on failure.
+
+    `fmt` may be "jpeg" or "webp"; the filename suffix should match.
+    """
     try:
         from PIL import Image as PILImage
 
         with PILImage.open(io.BytesIO(data)) as image:
             image.thumbnail((size, size))
             output = io.BytesIO()
-            image.convert("RGB").save(output, format="JPEG", quality=quality)
+            if str(fmt).lower() == "webp":
+                image.convert("RGB").save(output, format="WEBP", quality=quality)
+            else:
+                image.convert("RGB").save(output, format="JPEG", quality=quality)
             return output.getvalue()
     except Exception:
         return data

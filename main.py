@@ -39,7 +39,7 @@ from .core.debounce import Debouncer
 from .core.image_store import ImageStore
 from .core.image_format import validate_image_bytes
 from .core.logbook import clip, elapsed_ms, mask
-from .core.net import URLFetchPolicy, ensure_url_allowed, trusted_origins_from_config
+from .core.net import URLFetchPolicy, ensure_url_allowed, origin, trusted_origins_from_config
 from .core.output_spec import (
     OutputIntent,
     apply_conflict_rule,
@@ -235,8 +235,16 @@ class AIImagePlugin(BasePlugin):
         self._stats = ProviderStats(self._data_dir)
         self._configure_stats()
         self._store = TaskStore(self._data_dir)
-        self._gallery = ImageStore(self._data_dir, {"gallery": self._cfg("section_gallery")})
-        self._registry = ProviderRegistry(self._provider_config(), data_dir=self._data_dir)
+        self._gallery = ImageStore(self._data_dir, {
+            "gallery": self._cfg("section_gallery"),
+            "advanced": self._cfg("section_advanced"),
+        })
+        self._registry = ProviderRegistry(
+            self._provider_config(),
+            data_dir=self._data_dir,
+            policy=self._fetch_policy(),
+            image_max_bytes=self._advanced_max_bytes(),
+        )
         self._build_queue()
         self._queue.on_finished(self._on_task_finished)
         await self._queue.start()
@@ -325,11 +333,46 @@ class AIImagePlugin(BasePlugin):
             value = settings_mod.field_default("section_features", key, default)
         return str(value or default).strip()
 
-    async def _download_video(self, url: str) -> Path:
-        policy = URLFetchPolicy(
-            trusted_origins=trusted_origins_from_config(self._provider_config())
+    def _fetch_policy(self) -> URLFetchPolicy:
+        """Build the fetch policy from provider + advanced section config."""
+        advanced = self._cfg("section_advanced") or {}
+        if not isinstance(advanced, dict):
+            advanced = {}
+        trusted_result = set()
+        for line in str(advanced.get("trusted_result_origins") or "").splitlines():
+            value = origin(str(line).strip())
+            if value:
+                trusted_result.add(value)
+        return URLFetchPolicy(
+            trusted_origins=trusted_origins_from_config(self._provider_config()),
+            trusted_result_origins=frozenset(trusted_result),
+            allow_private_result_origins=bool(advanced.get("allow_private_result_origins")),
         )
-        return await download_video(url, self._data_dir / "gallery", policy)
+
+    def _advanced_max_bytes(self) -> int | None:
+        """Byte cap from the advanced section; None keeps the built-in default."""
+        advanced = self._cfg("section_advanced") or {}
+        if not isinstance(advanced, dict):
+            advanced = {}
+        value = advanced.get("image_max_mb")
+        try:
+            return max(1, int(value)) * 1024 * 1024 if value else None
+        except (TypeError, ValueError):
+            return None
+
+    async def _download_video(self, url: str) -> Path:
+        advanced = self._cfg("section_advanced") or {}
+        if not isinstance(advanced, dict):
+            advanced = {}
+        max_bytes = int(advanced.get("video_max_mb") or 256) * 1024 * 1024
+        timeout = int(advanced.get("download_timeout_seconds") or 120)
+        return await download_video(
+            url,
+            self._data_dir / "gallery",
+            self._fetch_policy(),
+            max_bytes=max_bytes,
+            timeout=timeout,
+        )
 
     def _consecutive_failures(self, provider_id: str) -> int:
         for entry in self._stats.snapshot():
@@ -517,7 +560,12 @@ class AIImagePlugin(BasePlugin):
 
     async def _reload_registry(self) -> None:
         old = self._registry
-        self._registry = ProviderRegistry(self._provider_config(), data_dir=self._data_dir)
+        self._registry = ProviderRegistry(
+            self._provider_config(),
+            data_dir=self._data_dir,
+            policy=self._fetch_policy(),
+            image_max_bytes=self._advanced_max_bytes(),
+        )
         if old is not None:
             await old.close()
 
@@ -536,7 +584,10 @@ class AIImagePlugin(BasePlugin):
                 retention_hours=int(section.get("task_retention_hours", 24) or 24),
             )
         if self._gallery is not None:
-            self._gallery.update_config({"gallery": self._cfg("section_gallery") or {}})
+            self._gallery.update_config({
+                "gallery": self._cfg("section_gallery") or {},
+                "advanced": self._cfg("section_advanced") or {},
+            })
         self._prune_old_tasks()
 
     def _prune_old_tasks(self) -> None:
@@ -2504,9 +2555,7 @@ class AIImagePlugin(BasePlugin):
         if not root:
             raise HTTPException(400, "先填好接口地址再获取模型")
         url = root.rstrip("/") + "/models"
-        policy = URLFetchPolicy(
-            trusted_origins=trusted_origins_from_config(self._provider_config())
-        )
+        policy = self._fetch_policy()
         try:
             await ensure_url_allowed(url, policy)
         except ValueError as exc:
@@ -2681,18 +2730,24 @@ class AIImagePlugin(BasePlugin):
         if path is None:
             return {"ok": False, "error": "图片不存在或已清理"}
         thumb = self._gallery.thumb_path(image_id)
+        params = self._gallery.encoding_params()
         if not thumb.is_file():
             from .core.image_format import thumbnail_webp
 
             data = await asyncio.to_thread(path.read_bytes)
-            data = await asyncio.to_thread(thumbnail_webp, data)
+            data = await asyncio.to_thread(
+                thumbnail_webp,
+                data,
+                params["thumb_size"],
+                params["thumb_quality"],
+                params["thumb_format"],
+            )
             thumb.write_bytes(data)
         return FileResponse(
             thumb,
-            media_type="image/webp",
+            media_type="image/jpeg" if params["thumb_format"].lower() == "jpeg" else "image/webp",
             headers={"Cache-Control": "private, max-age=31536000, immutable"},
         )
-
     @register.api(method="GET", path="/aiimg/gallery/preview", auth=True, summary="画廊预览图")
     async def api_gallery_preview(self, image_id: str):
         from fastapi.responses import FileResponse, Response
@@ -2704,16 +2759,24 @@ class AIImagePlugin(BasePlugin):
         if path is None:
             return {"ok": False, "error": "图片不存在或已清理"}
         preview = self._gallery.preview_path(image_id)
+        params = self._gallery.encoding_params()
         if not preview.is_file():
             from .core.image_format import preview_jpeg
             from .core.image_store import ImageStore
 
             data = await asyncio.to_thread(path.read_bytes)
-            data = await asyncio.to_thread(preview_jpeg, data)
+            data = await asyncio.to_thread(
+                preview_jpeg,
+                data,
+                params["preview_size"],
+                params["preview_quality"],
+                params["preview_format"],
+            )
             await asyncio.to_thread(ImageStore._atomic_write, preview, data)
+        fmt = str(params["preview_format"] or "jpeg").lower()
         return FileResponse(
             preview,
-            media_type="image/jpeg",
+            media_type="image/webp" if fmt == "webp" else "image/jpeg",
             headers={"Cache-Control": "private, max-age=31536000, immutable"},
         )
 

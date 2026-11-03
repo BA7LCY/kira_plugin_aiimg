@@ -227,6 +227,95 @@
       }
     }
   },
+  "section_advanced": {
+    "type": "section",
+    "name": "高级",
+    "collapsed": true,
+    "fields": {
+      "download_timeout_seconds": {
+        "type": "integer",
+        "name": "下载超时(秒)",
+        "default": 120,
+        "min": 5,
+        "max": 600,
+        "note": "从服务商下载图片/视频单次请求的超时。默认 120 秒。"
+      },
+      "image_max_mb": {
+        "type": "integer",
+        "name": "图片大小上限(MB)",
+        "default": 24,
+        "min": 1,
+        "max": 200,
+        "note": "服务商返回的图片超过这个大小就丢弃。默认 24 MB。"
+      },
+      "video_max_mb": {
+        "type": "integer",
+        "name": "视频大小上限(MB)",
+        "default": 256,
+        "min": 1,
+        "max": 2048,
+        "note": "服务商返回的视频超过这个大小就丢弃。默认 256 MB。"
+      },
+      "trusted_result_origins": {
+        "type": "textarea",
+        "name": "结果地址白名单",
+        "default": "",
+        "note": "一行一个。服务商把结果图放到内网/CDN 域名时，把那些域名写进来（比如 https://files.internal），本插件才允许从这些地址下载图片。写在这里的地址只用于下载结果，不影响其它安全检查。"
+      },
+      "allow_private_result_origins": {
+        "type": "switch",
+        "name": "允许内网结果地址",
+        "default": false,
+        "note": "开着时，结果地址白名单里的域名可以指向内网/本机地址；关掉时即使在白名单里，解析到内网的地址也一律拒绝。默认关。"
+      },
+      "thumb_width": {
+        "type": "integer",
+        "name": "缩略图宽度",
+        "default": 480,
+        "min": 64,
+        "max": 1024,
+        "note": "画廊列表缩略图的最长边。默认 480。"
+      },
+      "thumb_quality": {
+        "type": "integer",
+        "name": "缩略图质量",
+        "default": 82,
+        "min": 1,
+        "max": 100,
+        "note": "缩略图压缩质量，1-100。默认 82。"
+      },
+      "thumb_format": {
+        "type": "select",
+        "name": "缩略图格式",
+        "default": "webp",
+        "options": ["webp", "jpeg"],
+        "note": "webp 更小；jpeg 兼容性更好。默认 webp。"
+      },
+      "preview_size": {
+        "type": "integer",
+        "name": "预览图宽度",
+        "default": 2048,
+        "min": 128,
+        "max": 4096,
+        "note": "画廊弹窗预览图的最长边。默认 2048。"
+      },
+      "preview_quality": {
+        "type": "integer",
+        "name": "预览图质量",
+        "default": 90,
+        "min": 1,
+        "max": 100,
+        "note": "预览图压缩质量，1-100。默认 90。"
+      },
+      "preview_format": {
+        "type": "select",
+        "name": "预览图格式",
+        "default": "jpeg",
+        "options": ["jpeg", "webp"],
+        "note": "jpeg 兼容性更好；webp 更小。默认 jpeg。"
+      }
+    }
+  },
   "section_compat": {
     "type": "section",
     "name": "和框架自带生图的关系",

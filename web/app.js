@@ -734,6 +734,26 @@ function providerInput(provider, field) {
     if (meta.hint) wrap.append(el("div", { class: "hint" }, meta.hint));
     return wrap;
   }
+  if (field === "api_keys") {
+    const row = el("div", { class: "model-row keys-row" });
+    row.append(control);
+    row.append(
+      el(
+        "button",
+        {
+          class: "btn small ghost",
+          type: "button",
+          "data-action": "keys-bulk",
+          title: "批量粘贴多把密钥，一行一个",
+        },
+        iconNode("copy"),
+        "批量添加"
+      )
+    );
+    wrap.append(row);
+    if (meta.hint) wrap.append(el("div", { class: "hint" }, meta.hint));
+    return wrap;
+  }
   wrap.append(control);
   if (meta.hint) wrap.append(el("div", { class: "hint" }, meta.hint));
   return wrap;
@@ -2171,8 +2191,68 @@ async function moveReference(name, delta) {
   }
 }
 
-function openPresetEditor(sectionKey, field) {
+function openKeysBulk() {
+  const provider = selectedProvider();
+  if (!provider) return;
   const modal = $("#modal");
+  modal.replaceChildren();
+  const card = el("div", { class: "modal-shell narrow" });
+  card.append(
+    el(
+      "div",
+      { class: "modal-head" },
+      el("h3", { class: "modal-title" }, "批量添加密钥"),
+      el("span", { class: "spacer" }),
+      el(
+        "button",
+        { class: "icon-btn", type: "button", "data-action": "modal-close", title: "关闭" },
+        iconNode("close")
+      )
+    )
+  );
+  const body = el("div", { class: "modal-body" });
+  body.append(el("p", { class: "hint" }, "每行一把密钥，空行和重复的会自动跳过，保存后追加到现有密钥后面。"));
+  const area = el("textarea", {
+    rows: "8",
+    class: "keys-bulk-area",
+    placeholder: "sk-xxxx\nyyyy\nzzzz",
+    spellcheck: "false",
+  });
+  body.append(area);
+  body.append(
+    el(
+      "div",
+      { class: "modal-actions" },
+      el("span", { class: "spacer" }),
+      el(
+        "button",
+        { class: "btn small", type: "button", "data-action": "keys-bulk-save" },
+        iconNode("check"),
+        "保存"
+      )
+    )
+  );
+  card.append(body);
+  modal.append(card);
+  modal.classList.remove("hidden");
+  modal.querySelector("[data-action='keys-bulk-save']").addEventListener("click", () => {
+    const existing = (provider.api_keys || []).map((item) => String(item).trim()).filter(Boolean);
+    const seen = new Set(existing);
+    for (const line of String(area.value || "").split(/\r?\n/)) {
+      const key = line.trim();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      existing.push(key);
+    }
+    provider.api_keys = existing;
+    closeModal();
+    render();
+    toast(`密钥 ${existing.length} 把`, "success");
+  });
+  area.focus();
+}
+
+function openPresetEditor(sectionKey, field) {  const modal = $("#modal");
   modal.replaceChildren();
   const list = parsePresets(state.config[sectionKey]?.[field] || []);
   const card = el("div", { class: "modal-shell narrow" });
@@ -2539,6 +2619,10 @@ function onViewClick(event) {
     }
     if (action === "fetch-models") {
       fetchModels();
+      return;
+    }
+    if (action === "keys-bulk") {
+      openKeysBulk();
       return;
     }
     if (action === "gallery-tab") {

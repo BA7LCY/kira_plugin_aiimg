@@ -47,9 +47,18 @@ def retry_after_seconds(value: str | None) -> float | None:
 class ProviderHTTP:
     """Aiohttp wrapper kept injectable for unit tests."""
 
-    def __init__(self, timeout: int = 600, policy: URLFetchPolicy | None = None):
+    def __init__(
+        self,
+        timeout: int = 600,
+        policy: URLFetchPolicy | None = None,
+        *,
+        max_bytes: int | None = None,
+        dns_timeout: float | None = None,
+    ):
         self.timeout = timeout
         self.policy = policy or URLFetchPolicy()
+        self.max_bytes = max_bytes
+        self.dns_timeout = dns_timeout
 
     async def request_json(
         self,
@@ -60,7 +69,9 @@ class ProviderHTTP:
         json_body: dict[str, Any] | None = None,
         data: Any | None = None,
     ) -> dict[str, Any]:
-        timeout = aiohttp.ClientTimeout(total=max(1, int(self.timeout)))
+        timeout = aiohttp.ClientTimeout(total=max(1, int(self.timeout)), sock_connect=(
+            self.dns_timeout if self.dns_timeout is not None else None
+        ))
         started = time.monotonic()
         logger.info(
             "-> %s %s json=%s auth=%s",
@@ -102,7 +113,9 @@ class ProviderHTTP:
 
     async def download_image(self, url: str) -> bytes:
         await ensure_url_allowed(url, self.policy)
-        timeout = aiohttp.ClientTimeout(total=max(1, int(self.timeout)))
+        timeout = aiohttp.ClientTimeout(total=max(1, int(self.timeout)), sock_connect=(
+            self.dns_timeout if self.dns_timeout is not None else None
+        ))
         started = time.monotonic()
         logger.info("download %s", _safe_url(url))
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -116,7 +129,8 @@ class ProviderHTTP:
             len(data),
             int((time.monotonic() - started) * 1000),
         )
-        if len(data) > 24 * 1024 * 1024:
-            raise ValueError("图片超过 24 MB")
-        validate_image_bytes(data)
+        cap = int(self.max_bytes) if self.max_bytes else 24 * 1024 * 1024
+        if len(data) > cap:
+            raise ValueError(f"图片超过 {cap // (1024 * 1024)} MB")
+        validate_image_bytes(data, cap)
         return data

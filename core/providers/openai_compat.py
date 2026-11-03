@@ -167,10 +167,17 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
 
     _COOLDOWN_SECONDS = 600
 
-    def __init__(self, settings: ProviderSettings, *, policy: URLFetchPolicy | None = None):
+    def __init__(
+        self,
+        settings: ProviderSettings,
+        *,
+        policy: URLFetchPolicy | None = None,
+        image_max_bytes: int | None = None,
+    ):
         self.settings = settings
         self.provider_id = settings.id
         self.supports_edit = settings.supports_edit
+        self._image_max_bytes = image_max_bytes
         self.base_url = normalize_openai_compat_base_url(settings.base_url)
         self.api_keys = [
             str(k).strip() for k in (settings.api_keys or []) if str(k).strip()
@@ -414,9 +421,10 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
             if resp.status != 200:
                 raise RuntimeError(f"image download failed: HTTP {resp.status}")
             data = await resp.read()
-        if len(data) > 24 * 1024 * 1024:
-            raise ValueError("image exceeds 24 MB")
-        validate_image_bytes(data)
+        cap = int(getattr(self, "_image_max_bytes", 0) or 0) or (24 * 1024 * 1024)
+        if len(data) > cap:
+            raise ValueError(f"图片超过 {cap // (1024 * 1024)} MB")
+        validate_image_bytes(data, cap)
         return data
 
     async def _extract_image(self, resp: dict, model: str, size: str) -> ImageResult:

@@ -94,10 +94,17 @@ def _extract_image_ref(obj, depth: int = 0) -> str | None:
 class OpenAIFullURLBackend(KeyPoolMixin, ImageBackend):
     """POSTs a JSON body to a configured endpoint and extracts the image."""
 
-    def __init__(self, settings: ProviderSettings, *, policy: URLFetchPolicy | None = None):
+    def __init__(
+        self,
+        settings: ProviderSettings,
+        *,
+        policy: URLFetchPolicy | None = None,
+        image_max_bytes: int | None = None,
+    ):
         self.settings = settings
         self.provider_id = settings.id
         self.supports_edit = settings.supports_edit
+        self._image_max_bytes = image_max_bytes
         self.timeout = int(settings.timeout or 600)
         self.max_retries = settings.max_retries
         self.default_model = str(settings.model or "").strip()
@@ -188,9 +195,10 @@ class OpenAIFullURLBackend(KeyPoolMixin, ImageBackend):
             if resp.status != 200:
                 raise RuntimeError(f"image download failed: HTTP {resp.status}")
             data = await resp.read()
-        if len(data) > 24 * 1024 * 1024:
-            raise ValueError("image exceeds 24 MB")
-        validate_image_bytes(data)
+        cap = int(getattr(self, "_image_max_bytes", 0) or 0) or (24 * 1024 * 1024)
+        if len(data) > cap:
+            raise ValueError(f"图片超过 {cap // (1024 * 1024)} MB")
+        validate_image_bytes(data, cap)
         return data
 
     def _rewrite_loopback_ref(self, raw: str, endpoint: str) -> str:

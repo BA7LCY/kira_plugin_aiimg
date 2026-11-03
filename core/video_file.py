@@ -60,15 +60,23 @@ def validate_video_file(path: Path) -> None:
         raise ValueError("返回内容不是完整的 MP4/MOV 视频")
 
 
-async def download_video(url: str, directory: Path, policy: URLFetchPolicy) -> Path:
+async def download_video(
+    url: str,
+    directory: Path,
+    policy: URLFetchPolicy,
+    *,
+    max_bytes: int | None = None,
+    timeout: float | None = None,
+) -> Path:
     """Download fully before publishing; validate every redirect and clean failures."""
+    cap = max_bytes if max_bytes is not None else MAX_VIDEO_BYTES
     target = str(url or "").strip()
     directory.mkdir(parents=True, exist_ok=True)
     destination = directory / f"{uuid.uuid4().hex}.mp4"
     partial = destination.with_suffix(".part")
     try:
-        timeout = aiohttp.ClientTimeout(total=180, sock_read=30)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
+        timeout_total = aiohttp.ClientTimeout(total=timeout or 180, sock_read=30)
+        async with aiohttp.ClientSession(timeout=timeout_total) as session:
             for _ in range(6):
                 await ensure_url_allowed(target, policy)
                 async with session.get(target, allow_redirects=False) as response:
@@ -80,14 +88,14 @@ async def download_video(url: str, directory: Path, policy: URLFetchPolicy) -> P
                         continue
                     if response.status != 200:
                         raise ValueError(f"视频下载失败: HTTP {response.status}")
-                    if response.content_length is not None and response.content_length > MAX_VIDEO_BYTES:
-                        raise ValueError("视频超过 256 MB")
+                    if response.content_length is not None and response.content_length > cap:
+                        raise ValueError("视频超过大小上限")
                     size = 0
                     with partial.open("wb") as output:
                         async for chunk in response.content.iter_chunked(64 * 1024):
                             size += len(chunk)
-                            if size > MAX_VIDEO_BYTES:
-                                raise ValueError("视频超过 256 MB")
+                            if size > cap:
+                                raise ValueError("视频超过大小上限")
                             output.write(chunk)
                     if response.content_length is not None and size != response.content_length:
                         raise ValueError("视频文件下载不完整")

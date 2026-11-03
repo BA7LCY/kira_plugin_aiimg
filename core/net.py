@@ -13,6 +13,13 @@ from urllib.parse import urlsplit
 class URLFetchPolicy:
     trusted_origins: frozenset[str] = frozenset()
     dns_timeout_seconds: float = 2.0
+    # Result URLs from these origins may resolve to private/loopback IPs.
+    # The provider origin is always allowed; this covers file hosts the
+    # image service redirects to (e.g. a CDN on the same private network).
+    trusted_result_origins: frozenset[str] = frozenset()
+    # When false, result downloads to private IPs are rejected outright.
+    # When true, they are allowed only when the origin is trusted above.
+    allow_private_result_origins: bool = False
 
 
 def origin(url: str) -> str:
@@ -72,5 +79,14 @@ async def ensure_url_allowed(url: str, policy: URLFetchPolicy) -> None:
             ip = ipaddress.ip_address(address)
         except ValueError as exc:
             raise ValueError("图片域名解析结果无效") from exc
-        if not ip.is_global:
-            raise ValueError("图片地址不允许指向内网")
+        if ip.is_global:
+            continue
+        # Private/loopback addresses are only reachable when the caller opted
+        # in with a trusted result origin.
+        if (
+            current_origin
+            and policy.allow_private_result_origins
+            and current_origin in policy.trusted_result_origins
+        ):
+            continue
+        raise ValueError("图片地址不允许指向内网")
