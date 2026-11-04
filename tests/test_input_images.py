@@ -12,6 +12,9 @@ class _Gallery:
     def recent_images(self, sid):
         return list(self.paths)
 
+    def latest_image_paths(self, sid="", limit=1):
+        return list(self.paths)[: max(1, limit)]
+
 
 class _Quoted:
     """Stand-in for a Reply element that carries the quoted message's chain."""

@@ -1,5 +1,6 @@
 """TaskStore persistence tests (SQLite)."""
 
+import logging
 import time
 
 from core.task_store import TaskRecord, TaskStore
@@ -19,6 +20,33 @@ def test_create_and_get(tmp_path):
     assert fetched.kind == "generate_image"
     assert fetched.user_id == "u1"
     assert fetched.prompt == "猫"
+    store.close()
+
+
+def test_lifecycle_steps_are_logged_without_prompt_text(tmp_path, caplog):
+    store = _store(tmp_path)
+    secret = "这是一段很长的提示词，日志里不该出现"
+    with caplog.at_level(logging.INFO):
+        record = store.create(kind="generate_image", user_id="u1", prompt=secret)
+        store.set_error(record.task_id, "上游返回 500")
+    text = "\n".join(item.getMessage() for item in caplog.records)
+    assert "新建任务" in text
+    assert record.task_id in text
+    assert "已失败" in text
+    assert "上游返回 500" in text
+    assert secret not in text
+    store.close()
+
+
+def test_prune_old_logs_only_when_it_removed_rows(tmp_path, caplog):
+    store = _store(tmp_path)
+    keep = store.create(kind="generate_image", user_id="u1")
+    store.set_result(keep.task_id, "{}")
+    with caplog.at_level(logging.INFO):
+        assert store.prune_old(retention_hours=24) == 0
+    assert not any(
+        "清理过期任务记录" in record.getMessage() for record in caplog.records
+    )
     store.close()
 
 

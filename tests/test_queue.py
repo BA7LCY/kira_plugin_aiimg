@@ -1,11 +1,18 @@
 """TaskQueue concurrency, limits and finish-callback tests."""
 
 import asyncio
+import logging
 
 import pytest
 
-from core.queue import QueueCancelled, QueueFullError, TaskQueue, UserLimitError
-from core.task_store import TaskStore
+from core.queue import (
+    NoRunnerError,
+    QueueCancelled,
+    QueueFullError,
+    TaskQueue,
+    UserLimitError,
+)
+from core.task_store import TaskRecord, TaskStore
 
 
 def _queue(tmp_path, **kwargs):
@@ -119,8 +126,12 @@ def test_user_image_limit(tmp_path):
         first = store.create(kind="generate_image", user_id="u1").task_id
         await q.submit(store.get(first), runner)
         second = store.create(kind="generate_image", user_id="u1").task_id
-        with pytest.raises(UserLimitError):
+        with pytest.raises(UserLimitError) as info:
             await q.submit(store.get(second), runner)
+        # 给用户看的那句话只有事实，不含任何数字。
+        assert info.value.code == "too_many_running"
+        assert str(info.value) == "同时进行的任务太多"
+        assert not any(ch.isdigit() for ch in str(info.value))
         await _idle()
         await q.stop()
 
@@ -142,8 +153,9 @@ def test_image_and_video_limits_independent(tmp_path):
         vid = store.create(kind="generate_video", user_id="u1").task_id
         await q.submit(store.get(vid), runner)
         img2 = store.create(kind="generate_image", user_id="u1").task_id
-        with pytest.raises(UserLimitError):
+        with pytest.raises(UserLimitError) as info:
             await q.submit(store.get(img2), runner)
+        assert info.value.code == "too_many_running"
         await _idle()
         await q.stop()
 
@@ -165,8 +177,11 @@ def test_queue_full(tmp_path):
         b = store.create(kind="generate_image", user_id="u2").task_id
         await q.submit(store.get(b), runner)
         c = store.create(kind="generate_image", user_id="u3").task_id
-        with pytest.raises(QueueFullError):
+        with pytest.raises(QueueFullError) as info:
             await q.submit(store.get(c), runner)
+        assert info.value.code == "queue_full"
+        assert str(info.value) == "队列已满"
+        assert not any(ch.isdigit() for ch in str(info.value))
         await _idle()
         await q.stop()
 
@@ -197,7 +212,51 @@ def test_snapshot_shape(tmp_path):
     store.close()
 
 
-def test_restart_reschedules_active(tmp_path):
+def test_exception_codes_are_stable():
+    assert QueueFullError.code == "queue_full"
+    assert UserLimitError.code == "too_many_running"
+    assert QueueCancelled.code == "cancelled"
+    assert NoRunnerError.code == "no_runner"
+
+    # 不传话时也说一句普通中文，且不带任何数字。
+    for exc_type, expected in (
+        (QueueFullError, "队列已满"),
+        (UserLimitError, "同时进行的任务太多"),
+        (QueueCancelled, "任务已取消"),
+        (NoRunnerError, "没有可用的执行器"),
+    ):
+        text = str(exc_type())
+        assert text == expected
+        assert not any(ch.isdigit() for ch in text)
+
+
+def test_steps_are_logged_in_chinese(tmp_path, caplog):
+    store, q = _queue(tmp_path, max_running=1)
+
+    async def runner(rec):
+        await asyncio.sleep(0.01)
+        return {"ok": True}
+
+    async def scenario():
+        await q.start()
+        task_id = store.create(kind="generate_image", user_id="u1", prompt="猫").task_id
+        await q.submit(store.get(task_id), runner)
+        await _wait_status(store, task_id, {"succeeded"})
+        await q.stop()
+
+    with caplog.at_level(logging.INFO):
+        asyncio.run(scenario())
+
+    text = "\n".join(record.getMessage() for record in caplog.records)
+    assert "队列启动" in text
+    assert "入队任务" in text
+    assert "开始执行任务" in text
+    assert "结束：状态 succeeded" in text
+    assert "队列已停止" in text
+    store.close()
+
+
+def test_restart_reschedules_active(tmp_path, caplog):
     store, q = _queue(tmp_path, max_running=1)
     task_id = store.create(kind="generate_image", user_id="u1").task_id
     store.set_status(task_id, "running", provider="p1")
@@ -208,11 +267,16 @@ def test_restart_reschedules_active(tmp_path):
         await q.stop()
         return task_id
 
-    asyncio.run(scenario())
+    with caplog.at_level(logging.INFO):
+        asyncio.run(scenario())
     got = store.get(task_id)
     # No runner registered -> task failed with the missing-runner error.
     assert got.status == "failed"
-    assert "未注册" in got.error
+    assert got.error == "没有可用的执行器"
+    assert NoRunnerError.code == "no_runner"
+    assert any(
+        "没有可用的执行器" in record.getMessage() for record in caplog.records
+    )
     store.close()
 
 

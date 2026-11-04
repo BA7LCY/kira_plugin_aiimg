@@ -905,7 +905,7 @@ class _Req:
 def test_declared_feature_default_applies_without_a_saved_value(plugin_module, tmp_path):
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), _config())
 
-    template = plugin._features("error_notification_prompt")
+    template = plugin._features("result_notification_prompt")
 
     assert template == ""
 
@@ -913,18 +913,13 @@ def test_declared_feature_default_applies_without_a_saved_value(plugin_module, t
 def test_notification_prompts_are_empty_by_default(plugin_module, tmp_path):
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), _config())
 
-    for key in (
-        "ack_notification_prompt",
-        "terminal_notification_prompt",
-        "error_notification_prompt",
-        "denied_notification_prompt",
-    ):
+    for key in ("ack_notification_prompt", "result_notification_prompt"):
         assert plugin._features(key) == ""
 
 
 def test_failed_task_without_a_prompt_asks_the_persona(plugin_module, tmp_path):
     config = _config()
-    config["section_features"]["error_notification_prompt"] = ""
+    config["section_features"]["result_notification_prompt"] = ""
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     bus = _Bus()
     plugin.ctx.adapter_mgr = _AdapterMgr(_Adapter())
@@ -959,7 +954,7 @@ def test_failed_task_without_a_prompt_asks_the_persona(plugin_module, tmp_path):
 
 def test_failed_task_falls_back_to_plain_text(plugin_module, tmp_path):
     config = _config()
-    config["section_features"]["error_notification_prompt"] = ""
+    config["section_features"]["result_notification_prompt"] = ""
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     plugin.ctx.adapter_mgr = _AdapterMgr(_Adapter())
     sent = []
@@ -975,13 +970,14 @@ def test_failed_task_falls_back_to_plain_text(plugin_module, tmp_path):
     asyncio.run(plugin._notify_failure(record))
 
     assert len(sent) == 1
-    assert "没成功" in sent[0][1][0].text
+    payload = json.loads(sent[0][1][0].text)
+    assert payload == {"status": "failed", "task_id": "t1"}
     assert "HTTP 503" not in sent[0][1][0].text
 
 
 def test_failed_task_publishes_a_persona_notice(plugin_module, tmp_path):
     config = _config()
-    config["section_features"]["error_notification_prompt"] = "Explain {{error_kind}} in persona."
+    config["section_features"]["result_notification_prompt"] = "Explain {{error_kind}} in persona."
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     bus = _Bus()
     plugin.ctx.adapter_mgr = _AdapterMgr(_Adapter())
@@ -1007,7 +1003,7 @@ def test_failed_task_publishes_a_persona_notice(plugin_module, tmp_path):
     assert len(bus.events) == 1
     extra = bus.events[0].message.extra
     assert extra["_aiimg_task_error"] == "t2"
-    assert extra["_aiimg_template_key"] == "error_notification_prompt"
+    assert extra["_aiimg_template_key"] == "result_notification_prompt"
     assert extra["_aiimg_facts"]["error_kind"] == "服务商报错"
     assert "error" not in extra["_aiimg_facts"]
 
@@ -1121,13 +1117,13 @@ def test_notice_survives_an_older_trigger_signature(plugin_module, tmp_path):
 
 def test_error_notice_prompt_renders_task_facts(plugin_module, tmp_path):
     config = _config()
-    config["section_features"]["error_notification_prompt"] = "Explain {{error_kind}} in persona."
+    config["section_features"]["result_notification_prompt"] = "Explain {{error_kind}} in persona."
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     event = types.SimpleNamespace(
         message=types.SimpleNamespace(
             extra={
                 "_aiimg_task_error": "t3",
-                "_aiimg_template_key": "error_notification_prompt",
+                "_aiimg_template_key": "result_notification_prompt",
                 "_aiimg_facts": {"task_id": "t3", "error_kind": "服务商报错"},
             }
         )
@@ -1144,13 +1140,13 @@ def test_error_notice_without_a_prompt_still_gives_the_model_facts(
     plugin_module, tmp_path
 ):
     config = _config()
-    config["section_features"]["error_notification_prompt"] = ""
+    config["section_features"]["result_notification_prompt"] = ""
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     event = types.SimpleNamespace(
         message=types.SimpleNamespace(
             extra={
                 "_aiimg_task_error": "t6",
-                "_aiimg_template_key": "error_notification_prompt",
+                "_aiimg_template_key": "result_notification_prompt",
                 "_aiimg_facts": {"task_id": "t6", "error_kind": "超时"},
             }
         )
@@ -1169,13 +1165,13 @@ def test_success_notice_without_a_prompt_still_gives_the_model_facts(
     plugin_module, tmp_path
 ):
     config = _config()
-    config["section_features"]["terminal_notification_prompt"] = ""
+    config["section_features"]["result_notification_prompt"] = ""
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     event = types.SimpleNamespace(
         message=types.SimpleNamespace(
             extra={
                 "_aiimg_task": "t7",
-                "_aiimg_template_key": "terminal_notification_prompt",
+                "_aiimg_template_key": "result_notification_prompt",
                 "_aiimg_facts": {
                     "task_id": "t7",
                     "kind": "generate_image",
@@ -1201,7 +1197,7 @@ def test_success_notice_without_a_prompt_still_gives_the_model_facts(
 def test_notice_marker_is_found_on_the_batch_event(plugin_module, tmp_path):
     """The workflow hands plugins a batch event whose messages carry the marker."""
     config = _config()
-    config["section_features"]["terminal_notification_prompt"] = "Say {{kind}} is ready."
+    config["section_features"]["result_notification_prompt"] = "Say {{kind}} is ready."
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     event = types.SimpleNamespace(
         messages=[
@@ -1209,7 +1205,7 @@ def test_notice_marker_is_found_on_the_batch_event(plugin_module, tmp_path):
             types.SimpleNamespace(
                 extra={
                     "_aiimg_task": "t8",
-                    "_aiimg_template_key": "terminal_notification_prompt",
+                    "_aiimg_template_key": "result_notification_prompt",
                     "_aiimg_facts": {"task_id": "t8", "kind": "generate_image"},
                 }
             ),
@@ -1249,7 +1245,7 @@ def test_ack_text_is_task_facts_without_an_instruction(plugin_module, tmp_path):
     assert payload["status"] == "accepted"
     assert payload["task_id"] == "t4"
     assert payload["state"] == "queued"
-    assert "已加入生图队列" in payload["summary"]
+    assert set(payload) == {"status", "task_id", "kind", "state"}
     assert "instruction" not in payload
 
 
@@ -1266,24 +1262,24 @@ def test_ack_prompt_renders_into_the_instruction(plugin_module, tmp_path):
     assert payload["instruction"] == "Tell them about t5."
 
 
-def test_denied_uses_the_configured_template(plugin_module, tmp_path):
-    config = _config()
-    config["section_features"]["denied_notification_prompt"] = "{{action}} blocked: {{reason}}"
-    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
+def test_denied_returns_facts_instead_of_a_sentence(plugin_module, tmp_path):
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), _config())
 
-    text = plugin._denied("不在白名单里", "文生图")
+    payload = json.loads(plugin._denied("generate_image", "白名单"))
 
-    assert text == "文生图 blocked: 不在白名单里"
+    assert payload == {"status": "denied", "action": "generate_image", "reason": "白名单"}
 
 
-def test_denied_falls_back_to_a_short_fact(plugin_module, tmp_path):
-    config = _config()
-    config["section_features"]["denied_notification_prompt"] = ""
-    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
+def test_queue_refusal_keeps_the_counter_out_of_the_reply(plugin_module, tmp_path):
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), _config())
 
-    text = plugin._denied("不在白名单里", "文生图")
+    full = json.loads(plugin._queue_refusal("generate_image", plugin_module.QueueFullError(16)))
+    busy = json.loads(plugin._queue_refusal("generate_image", plugin_module.UserLimitError(2)))
 
-    assert text == "请求没有执行：现在不能做文生图，原因是不在白名单里。"
+    assert full["reason"] == "队列已满"
+    assert busy["reason"] == "同时进行的太多"
+    for payload in (full, busy):
+        assert "16" not in json.dumps(payload, ensure_ascii=False)
 
 
 # ----------------------------------------------------------------------
@@ -1492,7 +1488,7 @@ async def test_generate_selfie_explains_missing_references(plugin_module, tmp_pa
     finally:
         await plugin.terminate()
 
-    assert "去框架的人设配置里设置参考人像" in ack
+    assert json.loads(ack)["reason"] == "人设还没有参考人像"
 
 
 async def test_generate_selfie_explains_missing_uploads(plugin_module, tmp_path):
@@ -1503,7 +1499,7 @@ async def test_generate_selfie_explains_missing_uploads(plugin_module, tmp_path)
     finally:
         await plugin.terminate()
 
-    assert ack == "还没有可用的自拍参考图：去网页设置里上传参考图片"
+    assert json.loads(ack)["reason"] == "还没有上传参考图"
 
 
 async def test_edit_image_sends_role_filtered_uploads(plugin_module, tmp_path):

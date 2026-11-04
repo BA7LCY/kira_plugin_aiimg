@@ -652,6 +652,9 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
             with open(path, "rb") as fh:
                 image_bytes.append(fh.read())
 
+        # images/edits 的图片与提示词是各自独立的表单字段（图片走文件字段，
+        # 提示词走 prompt 文本字段），客户端按字段名传参，不存在「先图后文」
+        # 的先后顺序问题。这里只需要保证一次请求里图片字段和 prompt 字段都在。
         files: list[tuple[str, str, bytes, str]] = []
         if self._supports_multiple_images(final_model) and len(image_bytes) > 1:
             for index, data in enumerate(image_bytes, start=1):
@@ -669,6 +672,8 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
             fields["async"] = "true"
         fields.update({str(k): str(v) for k, v in self.extra_body.items()})
         fields.update({str(k): str(v) for k, v in (extra or {}).items()})
+        # 附加参数可能带上同名字段，最后再确认一次文字指令在场，避免被挤掉。
+        fields["prompt"] = prompt
 
         key = self._next_key()
         if self._is_edit_disabled():

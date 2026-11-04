@@ -91,6 +91,40 @@ def _extract_image_ref(obj, depth: int = 0) -> str | None:
     return None
 
 
+def build_edit_multipart_fields(
+    payload: dict,
+    images: list[Path],
+) -> list[tuple[str, object, dict]]:
+    """按「先图片、后文字」的顺序排好编辑请求的表单字段。
+
+    返回 (字段名, 值, add_field 参数) 三元组列表，图片文件字段在前、
+    提示词等文本字段在后。服务端一般按字段顺序处理表单，图片先到、
+    文字后到可以避免个别服务只取第一个字段当输入图而忽略参考图。
+    """
+    fields: list[tuple[str, object, dict]] = []
+    for index, path in enumerate(images, start=1):
+        data = Path(path).read_bytes()
+        mime, ext = guess_image_mime_and_ext(data)
+        fields.append(
+            (
+                "image",
+                data,
+                {"filename": f"image_{index}.{ext}", "content_type": mime},
+            )
+        )
+    for key, value in payload.items():
+        fields.append((str(key), str(value), {}))
+    return fields
+
+
+def build_edit_multipart(payload: dict, images: list[Path]) -> aiohttp.FormData:
+    """用排好序的字段构造 multipart 表单（图片在前、文字在后）。"""
+    form = aiohttp.FormData()
+    for name, value, options in build_edit_multipart_fields(payload, images):
+        form.add_field(name, value, **options)
+    return form
+
+
 class OpenAIFullURLBackend(KeyPoolMixin, ImageBackend):
     """POSTs a JSON body to a configured endpoint and extracts the image."""
 
@@ -342,8 +376,12 @@ class OpenAIFullURLBackend(KeyPoolMixin, ImageBackend):
         resp = None
         last_error: Exception | None = None
         for shape in json_shapes:
-            trial = dict(payload)
-            trial.update(shape)
+            # 图片字段先写进请求体、文字字段跟在后面：先图后文的顺序同时适用
+            # 于 JSON 请求体，服务端会按字段出现顺序解析输入。
+            # 这里用 setdefault 合并，保持原先「图片字段优先」的取值规则。
+            trial = dict(shape)
+            for key, value in payload.items():
+                trial.setdefault(key, value)
             try:
                 resp = await self._post_json(endpoint, trial)
                 last_error = None
@@ -378,17 +416,11 @@ class OpenAIFullURLBackend(KeyPoolMixin, ImageBackend):
         size: str,
     ) -> list[ImageResult]:
         session = await self._session_get()
-        form = aiohttp.FormData()
-        for key, value in payload.items():
-            form.add_field(key, str(value))
-        for index, path in enumerate(images, start=1):
-            with open(path, "rb") as fh:
-                data = fh.read()
-            mime, ext = guess_image_mime_and_ext(data)
-            form.add_field("image", data, filename=f"image_{index}.{ext}", content_type=mime)
+        # 表单里图片文件字段排在提示词等文字字段之前，见 build_edit_multipart_fields。
+        form = build_edit_multipart(payload, images)
         async with session.post(
             endpoint,
-            headers={"Authorization": self._headers().get("Authorization", "")},
+            headers=self._headers(self._next_key()),
             data=form,
             proxy=self.proxy_url or None,
         ) as resp:

@@ -1918,6 +1918,12 @@ function referenceFilesField(item, value, companion = null) {
   return wrap;
 }
 
+// 开关和它的列表并排：左边开关，右边列表摘要，两列各自贴顶。
+function switchListRow(switchField, listSummary) {
+  const row = el("div", { class: "field-row feature-row" }, switchField, listSummary);
+  return el("div", { class: "field wide" }, row);
+}
+
 function toLines(value) {
   if (Array.isArray(value)) {
     return value.map((entry) => String(entry ?? "").trim()).filter(Boolean);
@@ -2693,6 +2699,10 @@ function sectionInput(sectionKey, field, item, value) {
   if (sectionKey === "section_features" && (field === "draw_presets" || field === "edit_presets")) {
     return presetField(sectionKey, field, item, value);
   }
+  // 视频白名单和别处的白名单共用同一个列表编辑器。
+  if (sectionKey === "section_features" && field === "video_whitelist") {
+    return listField(sectionKey, field, item, value);
+  }
   if (sectionKey === "section_access" && field === "whitelist") {
     return listField(sectionKey, field, item, value);
   }
@@ -2837,6 +2847,17 @@ function renderSettings(root) {
         if (item.name) block.append(el("label", {}, item.name));
         if (item.hint || item.note) block.append(el("div", { class: "hint" }, item.hint || item.note));
         form.append(block);
+        continue;
+      }
+      // 视频开关和白名单同排：左边开关，右边列表摘要。
+      if (sectionKey === "section_features" && field === "video_enabled" && fields.video_whitelist) {
+        merged.add("video_whitelist");
+        form.append(
+          switchListRow(
+            sectionInput(sectionKey, field, item, values[field]),
+            sectionInput(sectionKey, "video_whitelist", fields.video_whitelist, values.video_whitelist)
+          )
+        );
         continue;
       }
       if (sectionKey === "section_features" && field === "selfie_reference_files") {

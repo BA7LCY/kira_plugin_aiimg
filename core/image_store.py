@@ -511,6 +511,23 @@ class ImageStore:
     def recent_images(self, sid: str) -> list[str]:
         return list(self._last_images.get(sid, []))
 
+    def latest_image_paths(self, sid: str = "", limit: int = 1) -> list[str]:
+        """Newest kept images, optionally limited to one session.
+
+        The in-memory ring is lost on restart, so 'latest' reads the table
+        instead: an empty ``sid`` means any session.
+        """
+        limit = max(1, int(limit or 1))
+        sql = "SELECT path FROM images WHERE archived = 0"
+        args: list[Any] = []
+        if sid:
+            sql += " AND sid = ?"
+            args.append(sid)
+        sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        args.append(limit)
+        rows = self._conn.execute(sql, args).fetchall()
+        return [str(row[0]) for row in rows]
+
     @staticmethod
     def _row_to_dict(row: sqlite3.Row | tuple) -> dict:
         if isinstance(row, sqlite3.Row):

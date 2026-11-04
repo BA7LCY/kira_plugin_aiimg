@@ -121,31 +121,19 @@ def _is_builtin_media_tag(tag: Any) -> bool:
     return "builtin_plugins" in (type(tag).__module__ or "")
 
 
-def _facts_line(facts: dict[str, str]) -> str:
-    """One factual line for notifications whose template is left empty.
+def _facts_text(facts: dict[str, Any]) -> str:
+    """Machine-readable facts for the turns whose prompt settings are empty.
 
-    Without it the model receives a bare image and no instruction, which makes
-    an empty ``<msg />`` reply the likely outcome.
+    A canned sentence here would be the plugin talking in its own voice; a JSON
+    line keeps every visible word under the persona's control while still giving
+    the model the fields it needs to phrase the outcome.
     """
-    bits = [f"任务 {facts.get('task_id') or '-'}"]
-    for key, label in (
-        ("kind", "类型"),
-        ("status", "状态"),
-        ("size", "尺寸"),
-        ("provider", "服务商"),
-        ("error_kind", "失败类别"),
-        ("delivery", "投递"),
-    ):
-        value = str(facts.get(key) or "").strip()
-        if value:
-            bits.append(f"{label} {value}")
-    return "；".join(bits) + "。"
-
-
-_NOTICE_HINT = (
-    "后台任务已经结束，请用当前人设自然地跟用户说一句结果，"
-    "不要念出任务号或字段名。"
-)
+    cleaned = {
+        str(key): value
+        for key, value in (facts or {}).items()
+        if str(value if value is not None else "").strip()
+    }
+    return json.dumps(cleaned, ensure_ascii=False, separators=(",", ":"))
 
 
 def _notification_extra(event: Any) -> dict:
@@ -246,7 +234,7 @@ class AIImagePlugin(BasePlugin):
         await self._queue.start()
         self._ready = True
         for error in self._registry.validate():
-            logger.warning("[aiimg] provider config: %s", error)
+            logger.warning("[aiimg] 服务商配置有误：%s", error)
         gallery = self._gallery.stats() or {}
         logger.info(
             "[aiimg] 数据目录 %s，画廊 %d 张（收藏 %d，占用 %.1f MB）",
@@ -285,7 +273,7 @@ class AIImagePlugin(BasePlugin):
             queue_cfg.get("max_user_image_tasks", "-"),
             queue_cfg.get("max_user_video_tasks", "-"),
         )
-        logger.info("[aiimg] initialized with %d image / %d video providers",
+        logger.info("[aiimg] 已载入 %d 个生图服务商 / %d 个视频服务商",
                     len(self._registry.image_provider_ids()),
                     len(self._registry.video_provider_ids()))
         logger.info(
@@ -421,13 +409,23 @@ class AIImagePlugin(BasePlugin):
                 return int(entry["consecutive_failures"])
         return 0
 
-    def _denied(self, reason: str, action: str) -> str:
-        """Tool result for a request the plugin refused to start."""
-        logger.info("[aiimg] 拒绝%s：%s", action, reason)
-        template = self._features("denied_notification_prompt", "")
-        if template:
-            return render_template(template, reason=reason, action=action).strip()
-        return f"请求没有执行：现在不能做{action}，原因是{reason}。"
+    def _denied(self, action: str, reason: str) -> str:
+        """Refuse a request with facts only.
+
+        The model sees why nothing started and can say it in persona; the plugin
+        never ships a canned sentence of its own.
+        """
+        logger.info("[aiimg] 拒绝 %s：%s", action, reason)
+        return json.dumps(
+            {"status": "denied", "action": action, "reason": reason},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    def _queue_refusal(self, action: str, exc: Exception) -> str:
+        """Queue rejections become facts too; the counters stay in the log."""
+        reason = "队列已满" if isinstance(exc, QueueFullError) else "同时进行的太多"
+        return self._denied(action, reason)
 
     def _feature_on(self, key: str, default: bool = True) -> bool:
         value = self._cfg("section_features", key)
@@ -483,7 +481,7 @@ class AIImagePlugin(BasePlugin):
         try:
             reference = await manager.get_reference_image()
         except Exception as exc:
-            logger.warning("[aiimg] failed to read persona reference: %s", exc)
+            logger.warning("[aiimg] 读取人设参考图失败：%s", exc)
             return None
         if not reference:
             return None
@@ -651,9 +649,9 @@ class AIImagePlugin(BasePlugin):
                 int(self._cfg("section_queue", "task_retention_hours", default=24) or 24)
             )
             if pruned:
-                logger.info("[aiimg] pruned %d old task records", pruned)
+                logger.info("[aiimg] 清理了 %d 条过期任务记录", pruned)
         except Exception as exc:
-            logger.warning("[aiimg] prune failed: %s", exc)
+            logger.warning("[aiimg] 清理任务记录失败：%s", exc)
 
     # ------------------------------------------------------------------
     # access control
@@ -693,6 +691,73 @@ class AIImagePlugin(BasePlugin):
             return True
         keys = [key for key in (user_id, group_id) if key]
         return any(self._matches_entry(entry, keys) for entry in whitelist)
+
+    def _video_allowed(self, event: Any) -> bool:
+        """Second gate for video; an empty list means everyone on the main list."""
+        entries = self._lines(self._cfg("section_features", "video_whitelist", default=[]))
+        if not entries:
+            return True
+        keys = [key for key in (self._user_id(event), self._group_id(event)) if key]
+        return any(self._matches_entry(entry, keys) for entry in entries)
+
+    def _scoped(self) -> bool:
+        """Whether lookups stay inside the caller's own session."""
+        value = self._cfg("section_access", "session_scope", default=True)
+        if isinstance(value, bool):
+            return value
+        return str(value).strip().lower() not in ("0", "false", "no", "off")
+
+    def _tool_available(self, name: str, event: Any) -> bool:
+        """Whether this turn should even see the tool.
+
+        An unavailable tool is removed from the turn, so the model never offers
+        a capability that would only end in a refusal.
+        """
+        if name == "generate_video":
+            return (
+                self._feature_on("video_enabled", default=False)
+                and self._video_allowed(event)
+                and bool(self._video_chain())
+            )
+        if name == "generate_selfie":
+            return self._feature_on("selfie_enabled") and bool(self._selfie_chain())
+        if name == "generate_image_batch":
+            return self._feature_on("batch_enabled") and bool(
+                self._image_chain("generate_image")
+            )
+        if name == "edit_image":
+            return self._feature_on("edit_enabled") and bool(self._image_chain("edit_image"))
+        if name == "generate_image":
+            return self._feature_on("draw_enabled") and bool(
+                self._image_chain("generate_image")
+            )
+        return True
+
+    @on.llm_request()
+    async def _hide_unavailable_tools(self, event, req: LLMRequest, *_):
+        """Trim the turn's tool list down to what this sender can actually use."""
+        if not self._ready:
+            return
+        allowed = self._can_use(
+            self._user_id(event), self._adapter_name(event), self._group_id(event)
+        )
+        removed: list[str] = []
+        for tool_name in TOOL_NAMES:
+            if tool_name in ("get_task_status", "resend_image", "find_image"):
+                continue
+            if allowed and self._tool_available(tool_name, event):
+                continue
+            try:
+                req.tool_set.remove(tool_name)
+                removed.append(tool_name)
+            except Exception:
+                continue
+        if removed:
+            logger.info(
+                "[aiimg] 本轮不提供工具：%s（白名单=%s）",
+                "、".join(removed),
+                "通过" if allowed else "未通过",
+            )
 
     # ------------------------------------------------------------------
     # chains
@@ -865,15 +930,15 @@ class AIImagePlugin(BasePlugin):
         if not self._ready or not self._gallery:
             return "插件未就绪"
         if not self._can_use(self._user_id(event), self._adapter_name(event), self._group_id(event)):
-            return self._denied("不在允许使用生图的白名单里", "生图")
+            return self._denied(kind, "白名单")
         if not self._feature_on("draw_enabled"):
-            return self._denied("文生图功能已在插件设置里关闭", "文生图")
+            return self._denied(kind, "功能关闭")
         prompt = str(prompt or "").strip()
         if not prompt:
             return "提示词不能为空"
         chain = self._image_chain(kind)
         if not chain:
-            return self._denied("没有配置可用的生图服务商", "生图")
+            return self._denied(kind, "没有服务商")
         if provider:
             chain = [item for item in chain if item.provider_id == provider]
             if not chain:
@@ -904,23 +969,26 @@ class AIImagePlugin(BasePlugin):
         try:
             await self._submit(record, self._run_generate)
         except (QueueFullError, UserLimitError) as exc:
-            return str(exc)
+            return self._queue_refusal(kind, exc)
         self._remember_task(event, kind, prompt, extra, record.task_id)
         return self._ack_text(record, "已加入生图队列", event)
 
     def _duplicate_ack(self, task_id: str, message: str, event: Any) -> str:
         """Acknowledge a collapsed duplicate without queueing a second task."""
         record = self._store.get(task_id) if self._store else None
+        logger.info("[aiimg] 重复请求复用任务 %s：%s", task_id, message)
         if record is not None:
-            return self._ack_text(record, f"{message}（同一条请求正在处理）", event)
+            payload = json.loads(self._ack_text(record, message, event))
+            payload["state"] = "reused"
+            return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
         return json.dumps(
             {
                 "status": "accepted",
                 "task_id": task_id,
-                "state": "duplicate",
-                "summary": f"{message}（同一条请求正在处理）",
+                "state": "reused",
             },
             ensure_ascii=False,
+            separators=(",", ":"),
         )
 
     async def _submit(
@@ -985,13 +1053,16 @@ class AIImagePlugin(BasePlugin):
         )
 
     def _ack_text(self, record: TaskRecord, message: str, event: Any = None) -> str:
+        """Facts-only acknowledgement; ``message`` is kept for the log only."""
+        logger.info("[aiimg] 接单回执 %s：%s", record.task_id, message)
         payload: dict[str, Any] = {
             "status": "accepted",
             "task_id": record.task_id,
             "kind": record.kind,
             "state": record.status,
-            "summary": message,
         }
+        if record.size:
+            payload["size"] = record.size
         instruction = self._features("ack_notification_prompt", "")
         if instruction:
             payload["instruction"] = render_template(
@@ -1051,7 +1122,7 @@ class AIImagePlugin(BasePlugin):
 
     @register.tool(
         name="generate_image",
-        description="根据文字描述生成图片。任务进入队列，完成后会自动把图片发送给发起者。可指定服务商、尺寸（如 1024x1024）、比例（如 16:9）或分辨率（1K/2K/4K）。",
+        description="根据文字描述生成图片。任务进入队列，完成后会自动把图片发送给发起者。可指定服务商、尺寸（如 1024x1024）、比例（如 16:9）或分辨率（1K/2K/4K）。用户只是随口描述画面、没说要图时不要调用。",
         params={
             "type": "object",
             "properties": {
@@ -1127,9 +1198,9 @@ class AIImagePlugin(BasePlugin):
         if not self._ready or not self._gallery:
             return "插件未就绪"
         if not self._can_use(self._user_id(event), self._adapter_name(event), self._group_id(event)):
-            return self._denied("不在允许使用生图的白名单里", "生图")
+            return self._denied("edit_image", "白名单")
         if not self._feature_on("edit_enabled"):
-            return self._denied("改图功能已在插件设置里关闭", "改图")
+            return self._denied("edit_image", "功能关闭")
         try:
             wanted_roles = self._wanted_reference_roles(reference_roles)
         except ValueError as exc:
@@ -1138,7 +1209,7 @@ class AIImagePlugin(BasePlugin):
         if str(image or "").strip():
             resolved = await self._resolve_input_image(event, image)
             if not resolved:
-                return "没有可用的输入图片：直接发一张图（或引用一张图）再来，或传 'latest' 用最近生成的图"
+                return self._denied("edit_image", "没有可用的图片")
             input_path = resolved
             message_extras: list[Path] = [path for path in attached if path != resolved]
         else:
@@ -1204,12 +1275,12 @@ class AIImagePlugin(BasePlugin):
         try:
             await self._submit(record, self._run_edit_image)
         except (QueueFullError, UserLimitError) as exc:
-            return str(exc)
+            return self._queue_refusal("edit_image", exc)
         return self._ack_text(record, "已加入改图队列", event)
 
     @register.tool(
         name="generate_selfie",
-        description="使用配置好的单人参考照片生成自拍/人像图。需要先在插件设置里配置参考图路径。可用 reference_roles 按角色挑参考图（subject 主体、clothing 服装、style 画风、pose 姿势、background 背景），选中的上传参考图会和人物参考一起发过去。",
+        description="使用当前人设的参考照片（或自己上传的参考图）生成自拍/人像图。参考图在哪配由插件设置决定，调用方不需要提供。可用 reference_roles 按角色挑参考图（subject 主体、clothing 服装、style 画风、pose 姿势、background 背景），选中的上传参考图会和人物参考一起发过去。",
         params={
             "type": "object",
             "properties": {
@@ -1243,9 +1314,9 @@ class AIImagePlugin(BasePlugin):
         if not self._ready or not self._gallery:
             return "插件未就绪"
         if not self._can_use(self._user_id(event), self._adapter_name(event), self._group_id(event)):
-            return self._denied("不在允许使用生图的白名单里", "生图")
+            return self._denied("generate_selfie", "白名单")
         if not self._feature_on("selfie_enabled"):
-            return self._denied("自拍功能已在插件设置里关闭", "自拍")
+            return self._denied("generate_selfie", "功能关闭")
         try:
             wanted_roles = self._wanted_reference_roles(reference_roles)
         except ValueError as exc:
@@ -1254,8 +1325,8 @@ class AIImagePlugin(BasePlugin):
         if not plan:
             use_persona = self._feature_on("selfie_use_persona", True)
             if not use_persona:
-                return "还没有可用的自拍参考图：去网页设置里上传参考图片"
-            return "还没有可用的自拍参考图：去框架的人设配置里设置参考人像，或在网页设置里改成本地上传"
+                return self._denied("generate_selfie", "还没有上传参考图")
+            return self._denied("generate_selfie", "人设还没有参考人像")
         persona = await self._persona_reference()
         try:
             kept, notes = refbridge.plan_references(
@@ -1270,10 +1341,10 @@ class AIImagePlugin(BasePlugin):
             logger.info("[aiimg] 自拍参考图：%s", note)
         plan = [(item.path, item.role) for item in kept]
         if not plan:
-            return "没有可用的自拍参考图：参考图片的来源无法确认，请重新上传"
+            return self._denied("generate_selfie", "参考图来源不明")
         chain = self._selfie_chain()
         if not chain:
-            return self._denied("没有配置可用的生图服务商", "生图")
+            return self._denied("generate_selfie", "没有服务商")
         extra = self._task_extra(
             event,
             explicit=self._explicit(size, aspect_ratio, resolution),
@@ -1295,7 +1366,7 @@ class AIImagePlugin(BasePlugin):
         try:
             await self._submit(record, self._run_selfie)
         except (QueueFullError, UserLimitError) as exc:
-            return str(exc)
+            return self._queue_refusal("generate_selfie", exc)
         return self._ack_text(record, "已加入自拍队列", event)
 
     @register.tool(
@@ -1355,14 +1426,14 @@ class AIImagePlugin(BasePlugin):
         if not self._ready or not self._gallery:
             return "插件未就绪"
         if not self._can_use(self._user_id(event), self._adapter_name(event), self._group_id(event)):
-            return self._denied("不在允许使用生图的白名单里", "生图")
+            return self._denied("generate_image_batch", "白名单")
         if not self._feature_on("batch_enabled"):
-            return self._denied("批量生图功能已在插件设置里关闭", "批量生图")
+            return self._denied("generate_image_batch", "功能关闭")
         prompts = self._batch_prompts(prompts)
         if not prompts:
             idea = str(brief or "").strip()
             if not idea:
-                return "要么给 prompts，要么给 brief"
+                return self._denied("generate_image_batch", "没有提示词")
             planned, problem = await self._plan_batch(idea, count)
             if problem:
                 return problem
@@ -1372,7 +1443,7 @@ class AIImagePlugin(BasePlugin):
             prompts = prompts[:limit]
         chain = self._image_chain("generate_image")
         if not chain:
-            return self._denied("没有配置可用的生图服务商", "生图")
+            return self._denied("generate_image_batch", "没有服务商")
         extra = self._task_extra(
             event,
             explicit=self._explicit(size, aspect_ratio, resolution),
@@ -1394,7 +1465,7 @@ class AIImagePlugin(BasePlugin):
         try:
             await self._submit(record, self._run_batch, is_batch=True)
         except (QueueFullError, UserLimitError) as exc:
-            return str(exc)
+            return self._queue_refusal("generate_image_batch", exc)
         return self._ack_text(record, f"已加入批量队列（{len(prompts)} 张）", event)
 
     @staticmethod
@@ -1451,7 +1522,7 @@ class AIImagePlugin(BasePlugin):
 
     @register.tool(
         name="generate_video",
-        description="用 Agnes 生成 AI 视频。image 留空时用当前消息或所回复消息里的图片作关键帧，传 'latest' 用最近生成的图片，也可传图片路径。任务生成较慢，完成后自动发送。",
+        description="生成 AI 视频。image 留空时用当前消息或所回复消息里的图片作关键帧，传 'latest' 用最近生成的图片，也可传图片路径。任务生成较慢，完成后自动发送。",
         params={
             "type": "object",
             "properties": {
@@ -1481,23 +1552,25 @@ class AIImagePlugin(BasePlugin):
         if not self._ready or not self._gallery:
             return "插件未就绪"
         if not self._can_use(self._user_id(event), self._adapter_name(event), self._group_id(event)):
-            return self._denied("不在允许使用生图的白名单里", "生图")
+            return self._denied("generate_video", "白名单")
+        if not self._video_allowed(event):
+            return self._denied("generate_video", "白名单")
         if not self._feature_on("video_enabled", default=False):
-            return self._denied("视频生成功能已在插件设置里关闭（默认关闭）", "视频生成")
+            return self._denied("generate_video", "功能关闭")
         chain = self._video_chain()
         if not chain:
-            return self._denied("没有配置可用的视频服务商", "视频生成")
+            return self._denied("generate_video", "没有服务商")
         seconds_text = str(seconds or "").strip()
         if seconds_text:
             if not seconds_text.isdigit():
-                return "seconds 必须是数字（4-12）"
+                return self._denied("generate_video", "时长不是数字")
             seconds_int = int(seconds_text)
             if not (_VIDEO_SECONDS[0] <= seconds_int <= _VIDEO_SECONDS[1]):
-                return f"seconds 必须在 {_VIDEO_SECONDS[0]}-{_VIDEO_SECONDS[1]} 之间"
+                return self._denied("generate_video", "时长超出范围")
             seconds_text = str(seconds_int)
         ratio = str(aspect_ratio or "").strip()
         if ratio and ratio not in _VIDEO_RATIOS:
-            return f"不支持的视频比例: {ratio}"
+            return self._denied("generate_video", "不支持的比例")
         mode_text = str(mode or "").strip().lower()
         if mode_text and mode_text not in ("auto", "text", "keyframe", "reference"):
             return "mode 只能是 auto/text/keyframe/reference"
@@ -1541,7 +1614,7 @@ class AIImagePlugin(BasePlugin):
         try:
             await self._submit(record, self._run_video)
         except (QueueFullError, UserLimitError) as exc:
-            return str(exc)
+            return self._queue_refusal("generate_video", exc)
         return self._ack_text(record, "已加入视频队列", event)
 
     @register.tool(
@@ -1559,32 +1632,48 @@ class AIImagePlugin(BasePlugin):
         if not self._store:
             return "插件未就绪"
         user_id = self._user_id(event)
+        manager = self._can_use(user_id, self._adapter_name(event), self._group_id(event))
         if task_id:
             record = self._store.get(task_id.strip())
             if record is None:
-                return f"未找到任务 {task_id}"
-            if record.user_id and record.user_id != user_id:
-                return "无权查看该任务"
+                return json.dumps(
+                    {"status": "missing", "task_id": task_id.strip()},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            if not self._visible(event, record):
+                return json.dumps(
+                    {"status": "denied", "action": "get_task_status", "reason": "不在这个会话"},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
             return self._describe_task(record)
         recent = [
             record
             for record in self._store.list_recent(limit=30)
-            if not record.user_id or record.user_id == user_id
+            if self._visible(event, record)
         ]
-        snapshot = self._queue.snapshot() if self._queue else {}
-        lines = [
-            f"队列: 运行中 {snapshot.get('running', 0)} / 等待 {snapshot.get('waiting', 0)}",
-        ]
-        if recent:
-            lines.append("最近任务:")
-            for record in recent[:8]:
-                lines.append(
-                    f"- {record.task_id} [{record.kind}] {record.status}"
-                    + (f" ({record.error})" if record.error else "")
-                )
-        else:
-            lines.append("暂无任务")
-        return "\n".join(lines)
+        payload: dict[str, Any] = {"status": "ok", "recent": []}
+        # Queue depth is an operator number; only the people who can spend on
+        # generation get to see it.
+        if manager and self._queue:
+            snapshot = self._queue.snapshot() or {}
+            payload["queue"] = {
+                "running": snapshot.get("running", 0),
+                "waiting": snapshot.get("waiting", 0),
+            }
+        for record in recent[:8]:
+            item: dict[str, Any] = {
+                "task_id": record.task_id,
+                "kind": record.kind,
+                "status": record.status,
+            }
+            if record.size:
+                item["size"] = record.size
+            if record.error:
+                item["error_kind"] = self._error_kind(record.error)
+            payload["recent"].append(item)
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     @register.tool(
         name="resend_image",
@@ -1600,13 +1689,12 @@ class AIImagePlugin(BasePlugin):
     async def resend_image(self, event: KiraMessageBatchEvent, task_id: str = "") -> str:
         if not self._ready or not self._store:
             return "插件未就绪"
-        user_id = self._user_id(event)
-        record = self._latest_media_task(user_id, task_id)
+        record = self._latest_media_task(event, task_id)
         if record is None:
-            return "还没有生成过图片，先让我画一张吧"
+            return self._denied("resend_image", "还没有可重发的图")
         elements = self._media_elements(record)
         if not elements:
-            return f"任务 {record.task_id} 没有可重发的图片或视频"
+            return self._denied("resend_image", "那条结果不在了")
         await self._safe_send(event.sid, MessageChain(elements))
         self._mark_ack_delivered(record.task_id)
         logger.info(
@@ -1621,24 +1709,32 @@ class AIImagePlugin(BasePlugin):
                 "task_id": record.task_id,
                 "kind": record.kind,
                 "count": len(elements),
-                "summary": "已重新发送上次的结果",
             },
             ensure_ascii=False,
+            separators=(",", ":"),
         )
 
-    def _latest_media_task(self, user_id: str, task_id: str = "") -> TaskRecord | None:
+    def _visible(self, event: Any, record: TaskRecord) -> bool:
+        """Whether this session may look at that record.
+
+        With isolation on, a group chat only sees what that group made and a
+        private chat only sees its own work.
+        """
+        if not self._scoped():
+            return True
+        return record.sid == getattr(event, "sid", "")
+
+    def _latest_media_task(self, event: Any, task_id: str = "") -> TaskRecord | None:
         """Find a succeeded task that still has deliverable media."""
         if task_id:
             record = self._store.get(task_id.strip()) if self._store else None
-            if record is None:
-                return None
-            if record.user_id and record.user_id != user_id:
+            if record is None or not self._visible(event, record):
                 return None
             return record if self._media_elements(record) else None
         for record in self._store.list_recent(limit=40):
             if record.status != "succeeded":
                 continue
-            if record.user_id and record.user_id != user_id:
+            if not self._visible(event, record):
                 continue
             if self._media_elements(record):
                 return record
@@ -1801,11 +1897,19 @@ class AIImagePlugin(BasePlugin):
         return found
 
     async def _gallery_latest(self, event: Any) -> Path | None:
-        recent = self._gallery.recent_images(event.sid) if self._gallery else []
-        if not recent:
+        """Newest image this session may use; isolation keeps the lookup local."""
+        if not self._gallery:
             return None
-        path = Path(recent[0])
-        return path if path.exists() else None
+        sid = event.sid if self._scoped() else ""
+        for path in self._gallery.latest_image_paths(sid, limit=5):
+            candidate = Path(path)
+            if candidate.exists():
+                return candidate
+        for path in self._gallery.recent_images(sid):
+            candidate = Path(path)
+            if candidate.exists():
+                return candidate
+        return None
 
     async def _plan_references(
         self, event: Any, pairs: list[tuple[Path, str]]
@@ -1874,31 +1978,34 @@ class AIImagePlugin(BasePlugin):
         return ""
 
     def _describe_task(self, record: TaskRecord) -> str:
-        result = ""
+        payload: dict[str, Any] = {
+            "status": "ok",
+            "task_id": record.task_id,
+            "kind": record.kind,
+            "state": record.status,
+        }
+        if record.provider:
+            payload["provider"] = record.provider
+        if record.size:
+            payload["size"] = record.size
+        if record.prompt:
+            payload["prompt"] = record.prompt
+        if record.final_prompt and record.final_prompt != record.prompt:
+            payload["final_prompt"] = record.final_prompt
+        if record.error:
+            payload["error_kind"] = self._error_kind(record.error)
         if record.result:
             try:
-                payload = json.loads(record.result or "{}")
-                media = payload.get("media") or []
-                result = f"，产出 {len(media)} 张" if media else ""
-                if payload.get("url"):
-                    result = "，视频已生成"
+                result = json.loads(record.result or "{}")
             except Exception:
-                pass
-        lines = [
-            f"任务 {record.task_id}",
-            f"类型: {record.kind}",
-            f"状态: {record.status}",
-            f"服务商: {record.provider or '未指定'}",
-        ]
-        if record.prompt:
-            lines.append(f"提示词: {record.prompt}")
-        if record.final_prompt:
-            lines.append(f"最终提示词: {record.final_prompt}")
-        if record.error:
-            lines.append(f"错误: {record.error}")
-        if result:
-            lines.append(f"结果: {result}")
-        return "\n".join(lines)
+                result = {}
+            media = result.get("media") or []
+            if media:
+                payload["media_count"] = len(media)
+            if result.get("url"):
+                payload["kind"] = "video"
+                payload["media_count"] = 1
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     # ------------------------------------------------------------------
     # runners (executed by the queue workers)
@@ -2047,7 +2154,7 @@ class AIImagePlugin(BasePlugin):
                     continue
                 results = await backend.edit(prompt, [source], intent=intent, size_hint="")
             except Exception as exc:
-                logger.warning("[aiimg] video frame via %s failed: %s", item.provider_id, exc)
+                logger.warning("[aiimg] 用 %s 取视频开场帧失败：%s", item.provider_id, exc)
                 continue
             if not results:
                 continue
@@ -2341,28 +2448,32 @@ class AIImagePlugin(BasePlugin):
             return "服务商报错"
         return "内部错误"
 
+    async def _publish_outcome(self, record: TaskRecord, facts: dict[str, Any]) -> bool:
+        """Hand one finished task to the model with facts only.
+
+        Failures and cancellations carry no media, and a turn whose chain is
+        empty gets dropped, so the JSON line doubles as the ride-along element.
+        """
+        return await self._publish_notification(
+            record,
+            [Text(_facts_text(facts))],
+            self._features("result_notification_prompt", ""),
+            facts,
+            marker=_ERROR_MARKER if facts.get("status") != "succeeded" else "",
+            template_key="result_notification_prompt",
+        )
+
     async def _notify_failure(self, record: TaskRecord) -> None:
-        """Let the model explain a failure in persona; ask once, then give up quietly."""
-        error = str(record.error or "").strip()
+        """Ask the model once to phrase a failure in persona; stay silent after."""
         facts = {
             "task_id": record.task_id,
             "kind": record.kind,
-            "status": "failed",
+            "status": record.status or "failed",
             "provider": record.provider or "",
             "size": record.size or "",
-            "error_kind": self._error_kind(error),
+            "error_kind": self._error_kind(str(record.error or "")),
         }
-        template = self._features("error_notification_prompt", "")
-        # A failure has no media to carry, and the route stage drops events
-        # whose chain is empty, so the turn needs one short line to ride along.
-        delivered = await self._publish_notification(
-            record,
-            [Text(_facts_line(facts))],
-            template,
-            facts,
-            marker=_ERROR_MARKER,
-            template_key="error_notification_prompt",
-        )
+        delivered = await self._publish_outcome(record, facts)
         logger.info(
             "[aiimg] 任务 %s 失败通知%s",
             record.task_id,
@@ -2371,7 +2482,7 @@ class AIImagePlugin(BasePlugin):
         if not delivered:
             await self._safe_send(
                 record.sid,
-                MessageChain([Text(f"任务 {record.task_id} 没成功，这次没出图。")]),
+                MessageChain([Text(_facts_text({"status": "failed", "task_id": record.task_id}))]),
             )
 
     async def _on_task_finished(self, record: TaskRecord) -> None:
@@ -2384,7 +2495,18 @@ class AIImagePlugin(BasePlugin):
             record.provider or "-",
         )
         if record.status == "cancelled":
-            await self._safe_send(record.sid, MessageChain([Text(f"任务 {record.task_id} 已取消")]))
+            facts = {"task_id": record.task_id, "kind": record.kind, "status": "cancelled"}
+            delivered = await self._publish_outcome(record, facts)
+            logger.info(
+                "[aiimg] 任务 %s 取消通知%s",
+                record.task_id,
+                "已交给模型" if delivered else "未发布（模型侧不可用）",
+            )
+            if not delivered:
+                await self._safe_send(
+                    record.sid,
+                    MessageChain([Text(_facts_text(facts))]),
+                )
             return
         if record.status == "failed":
             await self._notify_failure(record)
@@ -2423,8 +2545,9 @@ class AIImagePlugin(BasePlugin):
         if payload.get("count"):
             facts["count"] = str(payload["count"])
         if not elements:
+            await self._notify_failure(record)
             return
-        template = self._features("terminal_notification_prompt", "")
+        template = self._features("result_notification_prompt", "")
         # Deliver the media ourselves before asking the model for a sentence.
         # The synthetic event below reaches the model only; whatever it replies
         # is a separate message, so an empty reply can no longer swallow the
@@ -2445,7 +2568,13 @@ class AIImagePlugin(BasePlugin):
                 len(elements),
             )
             facts["delivery"] = "failed"
-        published = await self._publish_notification(record, elements, template, facts)
+        published = await self._publish_notification(
+            record,
+            elements,
+            template,
+            facts,
+            template_key="result_notification_prompt",
+        )
         logger.info(
             "[aiimg] 任务 %s 完成通知%s",
             record.task_id,
@@ -2477,10 +2606,10 @@ class AIImagePlugin(BasePlugin):
         record: TaskRecord,
         elements: list[Any],
         template: str,
-        facts: dict[str, str],
+        facts: dict[str, Any],
         *,
         marker: str = _NOTIFY_MARKER,
-        template_key: str = "terminal_notification_prompt",
+        template_key: str = "result_notification_prompt",
     ) -> bool:
         adapter_name = record.extra.get("adapter") or ""
         session_type = record.extra.get("session_type") or ""
@@ -2490,7 +2619,7 @@ class AIImagePlugin(BasePlugin):
         try:
             adapter = self.ctx.adapter_mgr.get_adapter(adapter_name)
         except Exception as exc:
-            logger.warning("[aiimg] adapter %s unavailable: %s", adapter_name, exc)
+            logger.warning("[aiimg] 适配器 %s 不可用：%s", adapter_name, exc)
             return False
         group = Group(group_id=session_id) if session_type == "gm" else None
         event = KiraMessageEvent(
@@ -2528,7 +2657,7 @@ class AIImagePlugin(BasePlugin):
         try:
             await self.ctx.event_bus.publish(event)
         except Exception as exc:
-            logger.warning("[aiimg] notification publish failed: %s", exc)
+            logger.warning("[aiimg] 通知事件发布失败：%s", exc)
             return False
         return True
 
@@ -2538,11 +2667,11 @@ class AIImagePlugin(BasePlugin):
         if not extra:
             return
         facts = extra.get("_aiimg_facts") or {}
-        template_key = extra.get("_aiimg_template_key") or "terminal_notification_prompt"
+        template_key = extra.get("_aiimg_template_key") or "result_notification_prompt"
         template = self._features(template_key, "")
         rendered = render_template(template, **facts).strip() if template else ""
         if not rendered:
-            rendered = f"{_facts_line(facts)}\n{_NOTICE_HINT}"
+            rendered = _facts_text(facts)
         if rendered:
             req.user_prompt.append(
                 Prompt(
@@ -2569,7 +2698,7 @@ class AIImagePlugin(BasePlugin):
                 Prompt(hint, name="aiimg_media_hint", source="aiimg", persist=False)
             )
         except Exception as exc:
-            logger.debug("[aiimg] failed to inject the media hint: %s", exc)
+            logger.debug("[aiimg] 注入图片提示失败：%s", exc)
 
     @on.llm_request()
     async def _inject_presets(self, event, req: LLMRequest, *_):
@@ -2596,7 +2725,7 @@ class AIImagePlugin(BasePlugin):
                 Prompt(content, name="aiimg_presets", source="aiimg", persist=False)
             )
         except Exception as exc:
-            logger.debug("[aiimg] failed to inject presets: %s", exc)
+            logger.debug("[aiimg] 注入预设说明失败：%s", exc)
 
     @on.llm_request(priority=Priority.LOW)
     async def _hide_builtin_media_tags(self, event, req, tag_set, *_):
@@ -2632,12 +2761,12 @@ class AIImagePlugin(BasePlugin):
         try:
             unregister(*removable)
         except Exception as exc:
-            logger.debug("[aiimg] failed to hide builtin media tags: %s", exc)
+            logger.debug("[aiimg] 摘除框架自带媒体标签失败：%s", exc)
             return
         if not self._builtin_tags_logged:
             self._builtin_tags_logged = True
             logger.info(
-                "[aiimg] builtin media tags disabled: %s",
+                "[aiimg] 已接管框架自带的媒体标签：%s",
                 ", ".join(sorted(removable)),
             )
 
@@ -3265,7 +3394,7 @@ class AIImagePlugin(BasePlugin):
             try:
                 path.unlink()
             except OSError as exc:
-                logger.warning("[aiimg] failed to delete reference file: %s", exc)
+                logger.warning("[aiimg] 删除参考图失败：%s", exc)
         refs_mod.remove_entry(self._data_dir, target)
         logger.info("[aiimg] 删除参考图 %s，剩 %d 张", target, len(self._ref_items()))
         return {"ok": True, "files": self._ref_items()}

@@ -476,23 +476,16 @@ CONSOLE_ONLY_FEATURES: dict[str, dict[str, Any]] = {
         "default": "",
         "note": "留空时，工具只返回任务事实（任务号、类型、状态），模型自己决定怎么回应；填了就作为指令附在工具结果里。可用 {{task_id}}（任务 ID）、{{kind}}（任务类型）、{{state}}（任务状态）。",
     },
-    "terminal_notification_prompt": {
+    "result_notification_prompt": {
         "type": "textarea",
-        "name": "任务完成通知提示词",
+        "name": "结果通知提示词",
         "default": "",
-        "note": "媒体已经发出去之后，这段话用来决定模型怎么补一句；留空时给任务事实（任务号、类型、状态、尺寸），并让模型用一句自然的话交代结果。可用 {{task_id}}（任务 ID）、{{kind}}（任务类型）、{{size}}（图片尺寸）、{{model}}（服务商返回的模型名）。",
-    },
-    "error_notification_prompt": {
-        "type": "textarea",
-        "name": "任务失败通知提示词",
-        "default": "",
-        "note": "这次没画成时交给模型的话术指令，只给失败类别，不给原始报错；留空时同样只给类别，由模型自己说。可用 {{error_kind}}（失败类别：超时、没出图、输入缺失、服务商报错、内部错误）。",
-    },
-    "denied_notification_prompt": {
-        "type": "textarea",
-        "name": "未执行提示词",
-        "default": "",
-        "note": "白名单不命中、功能关闭、没有可用服务商时返回给模型的指令；留空时只给原因，由模型自己说。可用 {{reason}}（没执行的原因）、{{action}}（被拦下的操作）。",
+        "note": (
+            "任务结束后交给模型的指令，成功、失败、部分失败共用这一条。留空时只给事实："
+            "任务号、类型、status（succeeded / failed / partial）、尺寸、失败类别、投递情况。"
+            "可用 {{task_id}}、{{kind}}、{{status}}、{{size}}、{{model}}、{{error_kind}}、"
+            "{{count}}、{{delivery}}。"
+        ),
     },
     "draw_presets": {
         "type": "textarea",

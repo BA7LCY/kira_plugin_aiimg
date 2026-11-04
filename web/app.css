@@ -1456,6 +1456,16 @@ table.data .mono {
   }
 }
 
+/* 开关配列表摘要：左边开关、右边列表，两列各自贴顶。 */
+.field-row.feature-row {
+  align-items: start;
+}
+
+/* 列表摘要本来占整行，放进这一行后只占自己那一列，标签多了在本列内换行。 */
+.field-row.feature-row > .field.wide {
+  grid-column: auto;
+}
+
 .danger-text {
   color: var(--danger);
 }

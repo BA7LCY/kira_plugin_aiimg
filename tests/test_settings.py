@@ -169,7 +169,7 @@ def test_console_only_fields_follow_the_order_of_the_saved_layout():
     assert keys.index("selfie_include_uploads") < keys.index("selfie_use_persona")
     assert keys.index("selfie_use_persona") < keys.index("selfie_prompt_prefix")
     assert keys.index("selfie_video_frame_template") < keys.index("prompts_heading")
-    assert keys.index("denied_notification_prompt") < keys.index("draw_presets")
+    assert keys.index("result_notification_prompt") < keys.index("draw_presets")
     assert keys[-3:] == ["draw_presets", "edit_presets", "presets_prompt"]
 
 

@@ -529,6 +529,27 @@ def _aspect_from_size(size: str | None) -> str | None:
     return f"{w_i // gcd}:{h_i // gcd}"
 
 
+def build_media_parts(text: str, image_bytes: list[bytes]) -> list[dict]:
+    """组装对话消息的内容数组：图片在前，文字在后。
+
+    一次请求同时带图片和文字时，先放图片、最后放文字。
+    服务端按内容块的先后顺序理解输入，图片在前时模型先看到参考图、
+    再读到指令，指令与图片的对应关系更明确；顺序颠倒容易让服务端
+    把文字当成同级的普通片段，参考图的作用被削弱。
+    """
+    parts: list[dict] = []
+    for data in image_bytes:
+        mime, _ext = guess_image_mime_and_ext(data)
+        parts.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": image_data_url(data, mime=mime)},
+            }
+        )
+    parts.append({"type": "text", "text": text})
+    return parts
+
+
 logger = get_logger("provider.chat")
 
 class OpenAIChatImageBackend(KeyPoolMixin, ImageBackend):
@@ -936,18 +957,6 @@ class OpenAIChatImageBackend(KeyPoolMixin, ImageBackend):
         for path in images:
             image_bytes.append(path.read_bytes())
 
-        def build_parts(text: str) -> list[dict]:
-            parts: list[dict] = [{"type": "text", "text": text}]
-            for data in image_bytes:
-                mime, _ext = guess_image_mime_and_ext(data)
-                parts.append(
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": image_data_url(data, mime=mime)},
-                    }
-                )
-            return parts
-
         user_text = self._compose_user_message(prompt, size=size, resolution=resolution)
         key = self._next_key()
 
@@ -958,7 +967,12 @@ class OpenAIChatImageBackend(KeyPoolMixin, ImageBackend):
                 refs = await self._post_chat(
                     key=key,
                     model=final_model,
-                    messages=[{"role": "user", "content": build_parts(user_text)}],
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": build_media_parts(user_text, image_bytes),
+                        }
+                    ],
                     extra_body=extra_body,
                     stream=True,
                 )
@@ -975,7 +989,12 @@ class OpenAIChatImageBackend(KeyPoolMixin, ImageBackend):
                 refs = await self._post_chat(
                     key=key,
                     model=final_model,
-                    messages=[{"role": "user", "content": build_parts(user_text)}],
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": build_media_parts(user_text, image_bytes),
+                        }
+                    ],
                     extra_body=extra_body,
                     stream=False,
                 )

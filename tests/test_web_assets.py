@@ -378,3 +378,41 @@ def test_settings_page_renders_select_fields_as_dropdowns():
     assert 'kind === "select"' in script
     assert '"data-section-field": field' in script
 
+
+def test_video_whitelist_uses_the_list_item_editor():
+    script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert 'if (sectionKey === "section_features" && field === "video_whitelist")' in script
+    branch = script.split('field === "video_whitelist"')[1].split("if (sectionKey")[0]
+    assert "return listField(sectionKey, field, item, value);" in branch
+    # 列表摘要上的按钮走 list-edit，最后仍然落到同一个列表编辑器。
+    assert "function listField(sectionKey, field, item, value)" in script
+    assert 'data-action": "list-edit"' in script
+    assert "target: `section:${sectionKey}:${field}`" in script
+    assert "function openListEditorFor(target, title)" in script
+    opener = script.split("function openListEditorFor(target, title)")[1].split(
+        "function openListEditor(options)"
+    )[0]
+    assert "openListEditor({" in opener
+    assert "function openListEditor(options)" in script
+
+
+def test_video_row_puts_the_list_summary_beside_the_switch():
+    script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    css = (WEB_DIR / "app.css").read_text(encoding="utf-8")
+
+    # 开关这一行自己开 field-row，白名单从正常顺序里跳过，不会重复渲染。
+    row = script.split('field === "video_enabled"')[1].split("continue;")[0]
+    assert "fields.video_whitelist" in row
+    assert "merged.add(\"video_whitelist\");" in row
+    assert "function switchListRow(switchField, listSummary)" in script
+    assert 'class: "field-row feature-row"' in script
+
+    # 两列各自贴顶；列表摘要只占自己那一列，标签多了在本列内换行。
+    rule = css.split(".field-row.feature-row {")[1].split("}")[0]
+    assert "align-items: start;" in rule
+    narrow = css.split(".field-row.feature-row > .field.wide {")[1].split("}")[0]
+    assert "grid-column: auto;" in narrow
+    # 复用已有的 chip 换行容器。
+    assert "flex-wrap: wrap;" in css.split(".preset-row {")[1].split("}")[0]
+

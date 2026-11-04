@@ -18,6 +18,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .logbook import clip, get_logger
+
+logger = get_logger("task_store")
+
 
 def _now() -> int:
     return int(time.time())
@@ -196,6 +200,7 @@ class TaskStore:
             "CREATE INDEX IF NOT EXISTS idx_tasks_lease ON tasks(status, lease_until)"
         )
         self._db.commit()
+        logger.info("任务库已就绪：%s，未结束任务 %d 个", self._path, self.count_active())
 
     # -- setup --------------------------------------------------------------
 
@@ -245,10 +250,14 @@ class TaskStore:
             str(row["name"])
             for row in self._db.execute("PRAGMA table_info(tasks)").fetchall()
         }
+        added: list[str] = []
         for name, decl in self._LEASE_COLUMNS:
             if name not in existing:
                 self._db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
+                added.append(name)
         self._db.commit()
+        if added:
+            logger.info("任务库补齐租约字段：%s", "、".join(added))
 
     def _alock(self) -> asyncio.Lock:
         """Lazily create the asyncio lock (bound to the running loop)."""
@@ -261,6 +270,7 @@ class TaskStore:
             self._db.close()
         except Exception:
             pass
+        logger.debug("任务库已关闭：%s", self._path)
 
     def create(
         self,
@@ -289,6 +299,13 @@ class TaskStore:
             extra=dict(extra or {}),
         )
         self.upsert(record)
+        logger.info(
+            "新建任务 %s：类型 %s，用户 %s，提供方 %s",
+            task_id,
+            record.kind,
+            record.user_id or "-",
+            record.provider or "-",
+        )
         return record
 
     def upsert(self, record: TaskRecord) -> None:
@@ -337,6 +354,14 @@ class TaskStore:
             ),
         )
         self._db.commit()
+        # 每条状态都会走 upsert，这一步只留 debug，免得一行状态改出两条日志。
+        logger.debug(
+            "任务 %s 写库：状态 %s，尝试 %d 次，持有者 %s",
+            record.task_id,
+            record.status,
+            int(record.attempts or 0),
+            record.owner or "-",
+        )
 
     def get(self, task_id: str) -> TaskRecord | None:
         row = self._db.execute(
@@ -423,8 +448,10 @@ class TaskStore:
         """
         record = self.get(task_id)
         if record is None:
+            logger.debug("改状态跳过：任务 %s 不存在", task_id)
             return
-        _validate_transition(record.status, status)
+        previous = record.status
+        _validate_transition(previous, status)
         record.status = status
         if provider:
             record.provider = provider
@@ -437,10 +464,13 @@ class TaskStore:
         elif status in ("succeeded", "failed", "cancelled") and not record.finished_at:
             record.finished_at = _now()
         self.upsert(record)
+        if status != previous:
+            logger.info("任务 %s 状态改动：%s → %s", task_id, previous, status)
 
     def set_result(self, task_id: str, result: str, *, provider: str = "") -> None:
         record = self.get(task_id)
         if record is None:
+            logger.debug("写结果跳过：任务 %s 不存在", task_id)
             return
         record.result = result
         if provider:
@@ -448,10 +478,12 @@ class TaskStore:
         record.status = "succeeded"
         record.finished_at = _now()
         self.upsert(record)
+        logger.info("任务 %s 已成功，结果 %d 字符", task_id, len(record.result))
 
     def set_error(self, task_id: str, error: str, *, provider: str = "") -> None:
         record = self.get(task_id)
         if record is None:
+            logger.debug("写错误跳过：任务 %s 不存在", task_id)
             return
         record.error = _clean_text(error)
         if provider:
@@ -459,6 +491,7 @@ class TaskStore:
         record.status = "failed"
         record.finished_at = _now()
         self.upsert(record)
+        logger.info("任务 %s 已失败：%s", task_id, clip(record.error, 120) or "-")
 
     def set_audit(
         self,
@@ -469,20 +502,27 @@ class TaskStore:
     ) -> None:
         record = self.get(task_id)
         if record is None:
+            logger.debug("写审计信息跳过：任务 %s 不存在", task_id)
             return
         if prompt_layers is not None:
             record.prompt_layers = list(prompt_layers)
         if final_prompt:
             record.final_prompt = final_prompt
         self.upsert(record)
+        # 提示词正文不进日志，只记层数，避免日志变成第二份提示词存档。
+        logger.debug(
+            "任务 %s 已记录提示词分层 %d 层", task_id, len(record.prompt_layers)
+        )
 
     def cancel(self, task_id: str) -> bool:
         record = self.get(task_id)
         if record is None or record.status not in ("queued", "running"):
+            logger.debug("取消未生效：任务 %s 不存在或已结束", task_id)
             return False
         record.status = "cancelled"
         record.finished_at = _now()
         self.upsert(record)
+        logger.info("任务 %s 已取消", task_id)
         return True
 
     # -- owner leases -------------------------------------------------------
@@ -521,7 +561,17 @@ class TaskStore:
                 (owner, deadline, int(now), task_id, now),
             )
             self._db.commit()
-            return cursor.rowcount > 0
+            won = cursor.rowcount > 0
+        if won:
+            logger.info(
+                "任务 %s 租约已获取：持有者 %s，租约 %d 秒",
+                task_id,
+                owner,
+                int(ttl_seconds),
+            )
+        else:
+            logger.debug("任务 %s 没抢到租约：已被别人持有或已结束", task_id)
+        return won
 
     async def heartbeat(
         self, task_id: str, owner: str, ttl_seconds: float
@@ -537,19 +587,32 @@ class TaskStore:
                 (deadline, task_id, owner),
             )
             self._db.commit()
-            return cursor.rowcount > 0
+            held = cursor.rowcount > 0
+        # 续租每隔十几秒一次，只留 debug；队列那边会在第一次续租时说一句。
+        logger.debug(
+            "任务 %s 续租%s：租约 %d 秒",
+            task_id,
+            "成功" if held else "未生效",
+            int(ttl_seconds),
+        )
+        return held
 
     async def release(self, task_id: str, owner: str) -> None:
         """Drop the lease; a non-holder is a silent no-op."""
         if not owner:
             return
         async with self._alock():
-            self._db.execute(
+            cursor = self._db.execute(
                 "UPDATE tasks SET owner = '', lease_until = 0 "
                 "WHERE task_id = ? AND owner = ?",
                 (task_id, owner),
             )
             self._db.commit()
+            dropped = cursor.rowcount > 0
+        if dropped:
+            logger.info("任务 %s 的租约已释放", task_id)
+        else:
+            logger.debug("任务 %s 的租约不在 %s 手上，无需释放", task_id, owner)
 
     async def stale_running(self, now: float | None = None) -> list[TaskRecord]:
         """Running tasks whose lease expired, oldest first."""
@@ -560,7 +623,10 @@ class TaskStore:
                 "ORDER BY created_at ASC, rowid ASC",
                 (moment,),
             ).fetchall()
-        return [TaskRecord.from_row(row) for row in rows]
+        records = [TaskRecord.from_row(row) for row in rows]
+        if records:
+            logger.info("发现 %d 个租约已过期的运行中任务", len(records))
+        return records
 
     async def bump_attempts(self, task_id: str) -> int:
         """Increment attempts and return the new value (0 for unknown tasks)."""
@@ -574,7 +640,9 @@ class TaskStore:
             row = self._db.execute(
                 "SELECT attempts FROM tasks WHERE task_id = ?", (task_id,)
             ).fetchone()
-            return int(row["attempts"]) if row else 0
+            attempts = int(row["attempts"]) if row else 0
+        logger.debug("任务 %s 尝试次数 +1，现为 %d 次", task_id, attempts)
+        return attempts
 
     def count_active_by_user(
         self, user_id: str, kind: str = "", exclude_task_id: str = ""
@@ -618,4 +686,8 @@ class TaskStore:
             (cutoff,),
         )
         self._db.commit()
-        return cur.rowcount
+        removed = cur.rowcount
+        # 清理是定时动作，只有真的删了东西才留一行。
+        if removed:
+            logger.info("清理过期任务记录 %d 条（保留 %d 小时）", removed, retention_hours)
+        return removed
