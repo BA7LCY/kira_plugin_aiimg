@@ -230,7 +230,6 @@ class AIImagePlugin(BasePlugin):
         self._store = TaskStore(self._data_dir)
         self._gallery = ImageStore(self._data_dir, {
             "gallery": self._cfg("section_gallery"),
-            "advanced": self._cfg("section_advanced"),
         })
         self._registry = ProviderRegistry(
             self._provider_config(),
@@ -626,7 +625,6 @@ class AIImagePlugin(BasePlugin):
         if self._gallery is not None:
             self._gallery.update_config({
                 "gallery": self._cfg("section_gallery") or {},
-                "advanced": self._cfg("section_advanced") or {},
             })
         self._prune_old_tasks()
 

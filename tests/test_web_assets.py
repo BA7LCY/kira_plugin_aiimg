@@ -330,7 +330,7 @@ def test_preset_editor_button_sits_next_to_the_chip():
     assert "presets-edit" in body
 
 
-def test_advanced_section_exposes_network_and_encoding_knobs():
+def test_advanced_section_exposes_network_knobs():
     schema = json.loads((WEB_DIR.parent / "schema.json").read_text(encoding="utf-8"))
     fields = schema["section_advanced"]["fields"]
 
@@ -340,6 +340,18 @@ def test_advanced_section_exposes_network_and_encoding_knobs():
         "video_max_mb",
         "trusted_result_origins",
         "allow_private_result_origins",
+    ):
+        assert name in fields, f"missing advanced field: {name}"
+    assert schema["section_advanced"]["collapsed"] is True
+    for name in ("thumb_width", "thumb_format", "preview_size", "preview_format"):
+        assert name not in fields, f"{name} belongs to the gallery section"
+
+
+def test_gallery_section_owns_the_encoding_knobs():
+    schema = json.loads((WEB_DIR.parent / "schema.json").read_text(encoding="utf-8"))
+    fields = schema["section_gallery"]["fields"]
+
+    for name in (
         "thumb_width",
         "thumb_quality",
         "thumb_format",
@@ -347,8 +359,16 @@ def test_advanced_section_exposes_network_and_encoding_knobs():
         "preview_quality",
         "preview_format",
     ):
-        assert name in fields, f"missing advanced field: {name}"
-    assert schema["section_advanced"]["collapsed"] is True
+        assert name in fields, f"missing gallery field: {name}"
+    assert fields["thumb_format"]["type"] == "select"
     assert fields["thumb_format"]["options"] == ["webp", "jpeg"]
+    assert fields["preview_format"]["type"] == "select"
     assert fields["preview_format"]["options"] == ["jpeg", "webp"]
+
+
+def test_settings_page_renders_select_fields_as_dropdowns():
+    script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert 'kind === "select"' in script
+    assert '"data-section-field": field' in script
 

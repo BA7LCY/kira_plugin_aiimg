@@ -1,4 +1,4 @@
-"""Encoding knobs and download caps must follow the advanced section."""
+"""Encoding knobs live in the gallery section and drive the stored derivatives."""
 
 from __future__ import annotations
 
@@ -55,8 +55,7 @@ def test_store_uses_configured_suffixes(tmp_path):
     store = ImageStore(
         tmp_path,
         {
-            "gallery": {},
-            "advanced": {
+            "gallery": {
                 "thumb_format": "jpeg",
                 "preview_format": "webp",
                 "thumb_width": 160,
@@ -76,7 +75,7 @@ def test_store_uses_configured_suffixes(tmp_path):
 def test_store_writes_derivatives_in_the_configured_format(tmp_path):
     store = ImageStore(
         tmp_path,
-        {"gallery": {}, "advanced": {"thumb_format": "jpeg", "preview_format": "webp"}},
+        {"gallery": {"thumb_format": "jpeg", "preview_format": "webp"}},
     )
     data = _png(600, 400)
     store.write_derivatives("img1", data)

@@ -2694,6 +2694,23 @@ function sectionInput(sectionKey, field, item, value) {
       el("span", { class: "track" }),
       el("span", { class: "switch-text" }, value === true ? "已开启" : "已关闭")
     );
+  } else if (kind === "select") {
+    const choices = Array.isArray(item.options) ? item.options.map(String) : [];
+    const current = value === undefined || value === null ? "" : String(value);
+    control = el(
+      "select",
+      {
+        "data-section": sectionKey,
+        "data-section-field": field,
+        "data-kind": "text",
+      },
+      ...(current && !choices.includes(current)
+        ? [el("option", { value: current }, current)]
+        : []),
+      ...choices.map((option) =>
+        el("option", { value: option, selected: option === current ? true : false }, option)
+      )
+    );
   } else if (kind === "integer" || kind === "float") {
     control = el("input", {
       type: "number",

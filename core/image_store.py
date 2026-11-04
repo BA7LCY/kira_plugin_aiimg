@@ -356,17 +356,17 @@ class ImageStore:
         return self._encoding_params()
 
     def _encoding_params(self) -> dict:
-        """Read the advanced encoding knobs from the stored config."""
-        advanced = self._config.get("advanced", {})
-        if not isinstance(advanced, dict):
-            advanced = {}
+        """Read the gallery encoding knobs from the stored config."""
+        gallery = self._config.get("gallery", {})
+        if not isinstance(gallery, dict):
+            gallery = {}
         return {
-            "thumb_size": int(advanced.get("thumb_width") or 480),
-            "thumb_quality": int(advanced.get("thumb_quality") or 82),
-            "thumb_format": str(advanced.get("thumb_format") or "webp"),
-            "preview_size": int(advanced.get("preview_size") or 2048),
-            "preview_quality": int(advanced.get("preview_quality") or 90),
-            "preview_format": str(advanced.get("preview_format") or "jpeg"),
+            "thumb_size": int(gallery.get("thumb_width") or 480),
+            "thumb_quality": int(gallery.get("thumb_quality") or 82),
+            "thumb_format": str(gallery.get("thumb_format") or "webp"),
+            "preview_size": int(gallery.get("preview_size") or 2048),
+            "preview_quality": int(gallery.get("preview_quality") or 90),
+            "preview_format": str(gallery.get("preview_format") or "jpeg"),
         }
 
     def write_derivatives(self, image_id: str, data: bytes) -> None:
