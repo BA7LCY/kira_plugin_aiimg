@@ -28,7 +28,7 @@ from ..async_task import (
     spec_from_config,
     task_state,
 )
-from ..http import backoff_delay, retry_after_seconds
+from ..http import backoff_delay, current_session, retry_after_seconds
 from ..logbook import get_logger
 from ..image_format import (
     guess_image_mime_and_ext,
@@ -220,21 +220,21 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
         self._generate_disabled_until = 0.0
         self._edit_disabled_until = 0.0
         self.async_mode = str(settings.async_mode or "auto").strip().lower()
-        self._session: aiohttp.ClientSession | None = None
 
     # -- session ------------------------------------------------------------
 
+    def _request_timeout(self) -> aiohttp.ClientTimeout:
+        """单次请求超时：沿用原来的总超时，不依赖共享会话的默认值。"""
+        return aiohttp.ClientTimeout(total=max(1, int(self.timeout)))
+
     async def _session_get(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=max(1, int(self.timeout)))
-            connector = aiohttp.TCPConnector(limit=8, limit_per_host=4)
-            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
-        return self._session
+        """复用进程内共享会话，不再为每个服务商单独建连接池。"""
+        logger.debug("图片接口复用共享会话")
+        return await current_session()
 
     async def close(self) -> None:
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
-        self._session = None
+        """共享会话由插件统一关闭，服务商这里只保留空实现。"""
+        logger.debug("图片接口关闭：共享会话由插件统一管理，此处不关闭")
 
     # -- helpers ------------------------------------------------------------
 
@@ -358,6 +358,7 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
                 headers=headers,
                 json=payload,
                 proxy=self.proxy_url or None,
+                timeout=self._request_timeout(),
             ) as resp:
                 body = await resp.read()
                 if resp.status in range(200, 300):
@@ -403,6 +404,7 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
                 headers=headers,
                 data=form,
                 proxy=self.proxy_url or None,
+                timeout=self._request_timeout(),
             ) as resp:
                 body = await resp.read()
                 if resp.status in range(200, 300):
@@ -428,7 +430,12 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
     async def _download(self, url: str) -> bytes:
         await ensure_url_allowed(url, self._policy)
         session = await self._session_get()
-        async with session.get(url, proxy=self.proxy_url or None, allow_redirects=False) as resp:
+        async with session.get(
+            url,
+            proxy=self.proxy_url or None,
+            allow_redirects=False,
+            timeout=self._request_timeout(),
+        ) as resp:
             if resp.status != 200:
                 raise RuntimeError(f"image download failed: HTTP {resp.status}")
             data = await resp.read()
@@ -534,7 +541,12 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
         headers = {"Authorization": f"Bearer {key}"}
 
         async def fetch(target: str) -> tuple[int, bytes]:
-            async with session.get(target, headers=headers, proxy=self.proxy_url or None) as poll:
+            async with session.get(
+                target,
+                headers=headers,
+                proxy=self.proxy_url or None,
+                timeout=self._request_timeout(),
+            ) as poll:
                 body = await poll.read()
                 return poll.status, body
 

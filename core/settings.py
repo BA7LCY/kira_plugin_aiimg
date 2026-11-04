@@ -484,7 +484,7 @@ CONSOLE_ONLY_FEATURES: dict[str, dict[str, Any]] = {
             "任务结束后交给模型的指令，成功、失败、部分失败共用这一条。留空时只给事实："
             "任务号、类型、status（succeeded / failed / partial）、尺寸、失败类别、投递情况。"
             "可用 {{task_id}}、{{kind}}、{{status}}、{{size}}、{{model}}、{{error_kind}}、"
-            "{{count}}、{{delivery}}。"
+            "{{count}}、{{delivery}}、{{image_ref}}。"
         ),
     },
     "draw_presets": {

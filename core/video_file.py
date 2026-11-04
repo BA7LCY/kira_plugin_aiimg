@@ -13,6 +13,7 @@ from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
+from .http import current_session
 from .net import URLFetchPolicy, ensure_url_allowed, origin
 
 MAX_VIDEO_BYTES = 256 * 1024 * 1024
@@ -118,6 +119,8 @@ async def _resolve_direct_url(
     url: str,
     policy: URLFetchPolicy,
     headers: dict[str, str],
+    *,
+    timeout: aiohttp.ClientTimeout | None = None,
 ) -> str:
     """Follow redirects and unwrap HTML/JSON landing pages down to a media file."""
     current = str(url or "").strip()
@@ -125,7 +128,12 @@ async def _resolve_direct_url(
         if _video_url(current):
             return current
         await ensure_url_allowed(current, policy)
-        async with session.get(current, headers=headers or None, allow_redirects=False) as resp:
+        async with session.get(
+            current,
+            headers=headers or None,
+            allow_redirects=False,
+            timeout=timeout,
+        ) as resp:
             if resp.status in _REDIRECT_STATUSES:
                 location = (resp.headers.get("Location") or "").strip()
                 if not location:
@@ -159,12 +167,19 @@ async def _probe(
     policy: URLFetchPolicy,
     headers: dict[str, str],
     cap: int,
+    *,
+    timeout: aiohttp.ClientTimeout | None = None,
 ) -> tuple[int, str]:
     """Ask for one byte to learn the total size and whether ranges work."""
     probe_headers = dict(headers or {})
     probe_headers["Range"] = "bytes=0-0"
     await ensure_url_allowed(url, policy)
-    async with session.get(url, headers=probe_headers, allow_redirects=False) as resp:
+    async with session.get(
+        url,
+        headers=probe_headers,
+        allow_redirects=False,
+        timeout=timeout,
+    ) as resp:
         if resp.status != 206:
             return 0, ""
         match = _RANGE_PATTERN.fullmatch((resp.headers.get("Content-Range") or "").strip())
@@ -184,6 +199,8 @@ async def _download_ranges(
     total: int,
     headers: dict[str, str],
     cap: int,
+    *,
+    timeout: aiohttp.ClientTimeout | None = None,
 ) -> None:
     """Pull byte ranges in parallel; each worker retries its own slice."""
     parts = [target.with_name(f"{target.name}.{index:05d}") for index in
@@ -203,7 +220,12 @@ async def _download_ranges(
         for attempt in range(_MAX_ATTEMPTS):
             try:
                 body = bytearray()
-                async with session.get(url, headers=request_headers, allow_redirects=False) as resp:
+                async with session.get(
+                    url,
+                    headers=request_headers,
+                    allow_redirects=False,
+                    timeout=timeout,
+                ) as resp:
                     if resp.status != 206:
                         raise RuntimeError(f"视频分片下载失败: HTTP {resp.status}")
                     async for chunk in resp.content.iter_chunked(64 * 1024):
@@ -256,6 +278,8 @@ async def _download_stream(
     policy: URLFetchPolicy,
     headers: dict[str, str],
     cap: int,
+    *,
+    timeout: aiohttp.ClientTimeout | None = None,
 ) -> None:
     """Stream to disk, resuming from whatever bytes survived an interruption."""
     current = url
@@ -271,7 +295,7 @@ async def _download_stream(
             while True:
                 await ensure_url_allowed(current, policy)
                 async with session.get(current, headers=request_headers or None,
-                                       allow_redirects=False) as resp:
+                                       allow_redirects=False, timeout=timeout) as resp:
                     if resp.status in _REDIRECT_STATUSES:
                         redirects += 1
                         if redirects > _MAX_REDIRECTS:
@@ -345,20 +369,30 @@ async def download_video(
     destination = directory / f"{uuid.uuid4().hex}.mp4"
     partial = destination.with_name(f"{destination.name}.part")
     timeout_total = aiohttp.ClientTimeout(total=timeout or 180, sock_read=30)
+    # 复用进程内共享会话，连接与 DNS 缓存跨任务生效；关会话由插件统一负责。
+    session = await current_session()
     try:
-        async with aiohttp.ClientSession(timeout=timeout_total) as session:
-            resolved = await _resolve_direct_url(session, target, policy, auth)
-            use_headers = auth if auth and origin(resolved) == auth_origin else {}
-            if parallel and resolved == target:
-                total, _ = await _probe(session, resolved, policy, use_headers, cap)
-                if total > _RANGE_THRESHOLD:
-                    await _download_ranges(session, resolved, partial, total, use_headers, cap)
-                    await asyncio.to_thread(validate_video_file, partial)
-                    os.replace(partial, destination)
-                    return destination
-            await _download_stream(session, resolved, partial, policy, use_headers, cap)
-            await asyncio.to_thread(validate_video_file, partial)
-            os.replace(partial, destination)
-            return destination
+        resolved = await _resolve_direct_url(
+            session, target, policy, auth, timeout=timeout_total
+        )
+        use_headers = auth if auth and origin(resolved) == auth_origin else {}
+        if parallel and resolved == target:
+            total, _ = await _probe(
+                session, resolved, policy, use_headers, cap, timeout=timeout_total
+            )
+            if total > _RANGE_THRESHOLD:
+                await _download_ranges(
+                    session, resolved, partial, total, use_headers, cap,
+                    timeout=timeout_total,
+                )
+                await asyncio.to_thread(validate_video_file, partial)
+                os.replace(partial, destination)
+                return destination
+        await _download_stream(
+            session, resolved, partial, policy, use_headers, cap, timeout=timeout_total
+        )
+        await asyncio.to_thread(validate_video_file, partial)
+        os.replace(partial, destination)
+        return destination
     finally:
         partial.unlink(missing_ok=True)

@@ -21,7 +21,7 @@ from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import aiohttp
 
-from ..http import backoff_delay, retry_after_seconds
+from ..http import backoff_delay, current_session, retry_after_seconds
 from ..logbook import get_logger
 from ..image_format import (
     decode_base64_image,
@@ -587,21 +587,21 @@ class OpenAIChatImageBackend(KeyPoolMixin, ImageBackend):
         self._policy = policy or URLFetchPolicy()
         self._init_key_pool(settings)
         self._cached_fallback: OpenAICompatBackend | None = None
-        self._session: aiohttp.ClientSession | None = None
 
     # -- session ------------------------------------------------------------
 
+    def _request_timeout(self) -> aiohttp.ClientTimeout:
+        """单次请求超时：沿用原来的总超时，不依赖共享会话的默认值。"""
+        return aiohttp.ClientTimeout(total=max(1, int(self.timeout)))
+
     async def _session_get(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=max(1, int(self.timeout)))
-            connector = aiohttp.TCPConnector(limit=8, limit_per_host=4)
-            self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
-        return self._session
+        """复用进程内共享会话，不再为每个服务商单独建连接池。"""
+        logger.debug("对话接口复用共享会话")
+        return await current_session()
 
     async def close(self) -> None:
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
-        self._session = None
+        """共享会话由插件统一关闭，服务商这里只保留空实现。"""
+        logger.debug("对话接口关闭：共享会话由插件统一管理，此处不关闭")
 
     def _next_key(self) -> str:
         if not self.api_keys:
@@ -694,6 +694,7 @@ class OpenAIChatImageBackend(KeyPoolMixin, ImageBackend):
                 headers=headers,
                 json=payload,
                 proxy=self.proxy_url or None,
+                timeout=self._request_timeout(),
             ) as resp:
                 body = await resp.read()
                 if resp.status not in range(200, 300):
@@ -735,7 +736,12 @@ class OpenAIChatImageBackend(KeyPoolMixin, ImageBackend):
     async def _download(self, url: str) -> bytes:
         await ensure_url_allowed(url, self._policy)
         session = await self._session_get()
-        async with session.get(url, proxy=self.proxy_url or None, allow_redirects=False) as resp:
+        async with session.get(
+            url,
+            proxy=self.proxy_url or None,
+            allow_redirects=False,
+            timeout=self._request_timeout(),
+        ) as resp:
             if resp.status != 200:
                 raise RuntimeError(f"image download failed: HTTP {resp.status}")
             data = await resp.read()

@@ -39,8 +39,11 @@ from .core import settings as settings_mod
 from .core.chains import ChainItem, chain_for
 from .core.debounce import Debouncer
 from .core.delivery import deliver_chain
+from .core.http import close_http, current_session
 from .core.image_store import ImageStore
 from .core.image_format import validate_image_bytes
+from .core.inspiration import InspirationStore
+from .core.memory import ImageMemory
 from .core.logbook import clip, elapsed_ms, mask
 from .core.net import URLFetchPolicy, ensure_url_allowed, origin, trusted_origins_from_config
 from .core.output_spec import (
@@ -70,7 +73,14 @@ TOOL_NAMES = (
     "generate_video",
     "get_task_status",
     "resend_image",
+    "find_image",
+    "save_inspiration",
+    "pick_inspiration",
 )
+
+# Read-only lookups: never gated by the whitelist, but still kept inside the
+# caller's own session unless isolation is turned off.
+READ_ONLY_TOOLS = ("get_task_status", "resend_image", "find_image", "pick_inspiration")
 
 IMAGE_KINDS = ("generate_image", "edit_image", "generate_selfie", "generate_image_batch")
 
@@ -192,6 +202,8 @@ class AIImagePlugin(BasePlugin):
         self._limiters: dict[str, tuple[int, asyncio.Semaphore]] = {}
         self._store: TaskStore | None = None
         self._gallery: ImageStore | None = None
+        self._memory: ImageMemory | None = None
+        self._inspiration: InspirationStore | None = None
         self._queue: TaskQueue | None = None
         # Identifies this process when several instances share one data dir.
         self._owner = new_owner_id()
@@ -220,6 +232,13 @@ class AIImagePlugin(BasePlugin):
         self._gallery = ImageStore(self._data_dir, {
             "gallery": self._cfg("section_gallery"),
         })
+        self._memory = ImageMemory(self._data_dir / "image_memory.sqlite3")
+        self._inspiration = InspirationStore(self._data_dir / "inspiration.json", limit=200)
+        logger.info(
+            "[aiimg] 记忆与灵感：记忆库 %s，灵感库 %d 条（上限 200）",
+            self._memory.db_path.name,
+            len(self._inspiration),
+        )
         self._registry = ProviderRegistry(
             self._provider_config(),
             data_dir=self._data_dir,
@@ -300,10 +319,13 @@ class AIImagePlugin(BasePlugin):
             await self._queue.stop()
         if self._gallery is not None:
             await self._gallery.close()
+        if self._memory is not None:
+            self._memory.close()
         if self._registry is not None:
             await self._registry.close()
         if self._store is not None:
             self._store.close()
+        await close_http()
 
     # ------------------------------------------------------------------
     # config helpers
@@ -743,7 +765,7 @@ class AIImagePlugin(BasePlugin):
         )
         removed: list[str] = []
         for tool_name in TOOL_NAMES:
-            if tool_name in ("get_task_status", "resend_image", "find_image"):
+            if tool_name in READ_ONLY_TOOLS:
                 continue
             if allowed and self._tool_available(tool_name, event):
                 continue
@@ -1157,14 +1179,14 @@ class AIImagePlugin(BasePlugin):
 
     @register.tool(
         name="edit_image",
-        description="基于现有图片进行修改（图生图）。image 留空时用当前消息或所回复消息里的图片，可以一次带多张（最多 4 张，其余作为参考图）；传 'latest' 用本会话最近生成的图片；也可传图片文件路径。可用 reference_roles 按角色挑参考图（subject 主体、clothing 服装、style 画风、pose 姿势、background 背景），选中的上传参考图会和原图一起发过去。",
+        description="基于现有图片进行修改（图生图）。image 留空时用当前消息或所回复消息里的图片，可以一次带多张（最多 4 张，其余作为参考图）；传 'latest' 用本会话最近生成的图片；也可以传 find_image 给出的图片编号或图片文件路径。可用 reference_roles 按角色挑参考图（subject 主体、clothing 服装、style 画风、pose 姿势、background 背景），选中的上传参考图会和原图一起发过去。",
         params={
             "type": "object",
             "properties": {
                 "prompt": {"type": "string", "description": "修改要求"},
                 "image": {
                     "type": "string",
-                    "description": "留空用消息里的图片（多张时第一张是原图）；'latest' 用最近生成的图；也可传本地图片路径",
+                    "description": "留空用消息里的图片（多张时第一张是原图）；'latest' 用最近生成的图；也可以给 find_image 返回的编号或本地图片路径",
                 },
                 "provider": {"type": "string", "description": "服务商 id，留空用默认链路"},
                 "size": {"type": "string", "description": "精确尺寸，如 1024x1024"},
@@ -1522,14 +1544,14 @@ class AIImagePlugin(BasePlugin):
 
     @register.tool(
         name="generate_video",
-        description="生成 AI 视频。image 留空时用当前消息或所回复消息里的图片作关键帧，传 'latest' 用最近生成的图片，也可传图片路径。任务生成较慢，完成后自动发送。",
+        description="生成 AI 视频。image 留空时用当前消息或所回复消息里的图片作关键帧，传 'latest' 用最近生成的图片，也可以传 find_image 给出的编号或图片路径。任务生成较慢，完成后自动发送。",
         params={
             "type": "object",
             "properties": {
                 "prompt": {"type": "string", "description": "视频内容描述"},
                 "image": {
                     "type": "string",
-                    "description": "留空用消息里的图片作关键帧；'latest' 用最近生成的图；也可传本地图片路径",
+                    "description": "留空用消息里的图片作关键帧；'latest' 用最近生成的图；也可以给 find_image 返回的编号或本地图片路径",
                 },
                 "provider": {"type": "string", "description": "视频服务商 id"},
                 "seconds": {"type": "string", "description": "时长（秒），4 到 12"},
@@ -1677,18 +1699,23 @@ class AIImagePlugin(BasePlugin):
 
     @register.tool(
         name="resend_image",
-        description="重新发送上一次生成的图片或视频，不重新生成。用户说“再发一次”“刚才那张再给我看看”或图片没收到时用它。不传 task_id 时取该用户最近一次成功的任务。",
+        description="重新发送已经生成过的图片或视频，不重新生成。用户说“再发一次”“刚才那张再给我看看”或图片没收到时用它。不传参数时取这个会话最近一次成功的结果，也可以给 find_image 返回的编号。",
         params={
             "type": "object",
             "properties": {
                 "task_id": {"type": "string", "description": "任务编号，留空用最近一次成功的任务"},
+                "image_ref": {"type": "string", "description": "图片编号（find_image 返回的 img- 开头编号），留空则按任务或最近一次"},
             },
             "required": [],
         },
     )
-    async def resend_image(self, event: KiraMessageBatchEvent, task_id: str = "") -> str:
+    async def resend_image(
+        self, event: KiraMessageBatchEvent, task_id: str = "", image_ref: str = ""
+    ) -> str:
         if not self._ready or not self._store:
             return "插件未就绪"
+        if image_ref.strip():
+            return await self._resend_by_ref(event, image_ref.strip())
         record = self._latest_media_task(event, task_id)
         if record is None:
             return self._denied("resend_image", "还没有可重发的图")
@@ -1713,6 +1740,219 @@ class AIImagePlugin(BasePlugin):
             ensure_ascii=False,
             separators=(",", ":"),
         )
+
+    async def _resend_by_ref(self, event: Any, ref: str) -> str:
+        """Send one remembered file back by its short ref."""
+        path = ""
+        if self._memory is not None:
+            try:
+                path = self._memory.resolve(
+                    ref, sid=getattr(event, "sid", ""), scoped=self._scoped()
+                ) or ""
+            except Exception as exc:
+                logger.warning("[aiimg] 按编号查图失败 %s：%s", ref, exc)
+        if not path:
+            return json.dumps(
+                {"status": "missing", "image_ref": ref},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        target = Path(path)
+        is_video = target.suffix.lower() in (".mp4", ".webm", ".mov")
+        element = Video(file=str(target)) if is_video else Image(image=str(target))
+        sent = await self._safe_send(getattr(event, "sid", ""), MessageChain([element]))
+        logger.info(
+            "[aiimg] 按编号 %s 重发%s：%s",
+            ref,
+            "视频" if is_video else "图片",
+            "成功" if sent else "失败",
+        )
+        return json.dumps(
+            {
+                "status": "resent" if sent else "failed",
+                "image_ref": ref,
+                "kind": "video" if is_video else "image",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    @register.tool(
+        name="find_image",
+        description="翻这个会话画过的东西：按描述或类型列出编号和内容，只回清单不发图。想重发其中某张时，把编号交给 resend_image。",
+        params={
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "按提示词里出现过的词找，留空表示不筛"},
+                "kind": {
+                    "type": "string",
+                    "description": "只看某类：image 图片、selfie 自拍、video 视频，留空表示全部",
+                    "enum": ["", "image", "selfie", "video"],
+                },
+                "limit": {"type": "integer", "description": "最多几条，默认 8，最多 20"},
+            },
+            "required": [],
+        },
+    )
+    async def find_image(
+        self, event: KiraMessageBatchEvent, query: str = "", kind: str = "", limit: int = 8
+    ) -> str:
+        if self._memory is None:
+            return "插件未就绪"
+        try:
+            size = max(1, min(int(limit or 8), 20))
+        except (TypeError, ValueError):
+            size = 8
+        wanted = str(kind or "").strip()
+        if wanted not in ("image", "selfie", "video"):
+            wanted = ""
+        try:
+            rows = self._memory.find(
+                query=str(query or ""),
+                kind=wanted,
+                sid=getattr(event, "sid", ""),
+                scoped=self._scoped(),
+                limit=size,
+            )
+        except Exception as exc:
+            logger.warning("[aiimg] 翻图片记忆失败：%s", exc)
+            return self._denied("find_image", "内部错误")
+        images = [
+            {
+                "image_ref": row.get("ref", ""),
+                "kind": row.get("kind", ""),
+                "prompt": clip(row.get("prompt", ""), 80),
+            }
+            for row in rows
+        ]
+        logger.info(
+            "[aiimg] 翻图片记忆：条件=%s/%s，命中 %d 条（会话 %s）",
+            clip(query, 40) or "-",
+            wanted or "全部",
+            len(images),
+            getattr(event, "sid", "") or "-",
+        )
+        return json.dumps(
+            {"status": "ok", "count": len(images), "images": images},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    @register.tool(
+        name="save_inspiration",
+        description="把一条以后还能复用的画面描述存进灵感库。用户说“记下来”“存个点子”“这个想法留着”时用它。",
+        params={
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "要存的画面描述"},
+                "tags": {"type": "string", "description": "顺手打几个标签，用空格或逗号隔开，可留空"},
+            },
+            "required": ["text"],
+        },
+    )
+    async def save_inspiration(
+        self, event: KiraMessageBatchEvent, text: str, tags: str = ""
+    ) -> str:
+        if self._inspiration is None:
+            return "插件未就绪"
+        body = str(text or "").strip()
+        if not body:
+            return self._denied("save_inspiration", "内容为空")
+        if not self._can_use(
+            self._user_id(event), self._adapter_name(event), self._group_id(event)
+        ):
+            return self._denied("save_inspiration", "白名单")
+        raw_tags = str(tags or "")
+        for mark in ("，", ",", "、", ";"):
+            raw_tags = raw_tags.replace(mark, " ")
+        labels = raw_tags.split()
+        try:
+            entry = self._inspiration.add(
+                body,
+                tags=labels,
+                sid=getattr(event, "sid", ""),
+                user_id=self._user_id(event),
+            )
+        except ValueError as exc:
+            return self._denied("save_inspiration", str(exc))
+        except OSError as exc:
+            logger.error("[aiimg] 灵感库写入失败：%s", exc)
+            return self._denied("save_inspiration", "写入失败")
+        logger.info(
+            "[aiimg] 灵感库新增 %s，标签 %s，当前 %d 条",
+            entry.get("id", "-"),
+            "、".join(labels) or "-",
+            len(self._inspiration),
+        )
+        return json.dumps(
+            {"status": "saved", "id": entry.get("id", ""), "tags": labels},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    @register.tool(
+        name="pick_inspiration",
+        description="从灵感库里随机翻几条以前存下的画面描述，用来给接下来要画的东西找方向。",
+        params={
+            "type": "object",
+            "properties": {
+                "count": {"type": "integer", "description": "要几条，默认 3，最多 8"},
+            },
+            "required": [],
+        },
+    )
+    async def pick_inspiration(self, event: KiraMessageBatchEvent, count: int = 3) -> str:
+        if self._inspiration is None:
+            return "插件未就绪"
+        try:
+            size = max(1, min(int(count or 3), 8))
+        except (TypeError, ValueError):
+            size = 3
+        try:
+            rows = self._inspiration.random(
+                count=size, sid=getattr(event, "sid", ""), scoped=self._scoped()
+            )
+        except Exception as exc:
+            logger.warning("[aiimg] 翻灵感库失败：%s", exc)
+            return self._denied("pick_inspiration", "内部错误")
+        logger.info("[aiimg] 灵感库随机取 %d 条", len(rows))
+        return json.dumps(
+            {
+                "status": "ok",
+                "count": len(rows),
+                "ideas": [
+                    {"id": row.get("id", ""), "text": row.get("text", ""), "tags": row.get("tags", [])}
+                    for row in rows
+                ],
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+
+    def _remember_media(
+        self, paths: list[str], *, record: TaskRecord, kind: str, prompt: str = ""
+    ) -> list[str]:
+        """Give every saved file a short ref the model can quote later."""
+        if self._memory is None or not paths:
+            return []
+        try:
+            refs = self._memory.remember(
+                list(paths),
+                sid=record.sid,
+                kind=kind,
+                task_id=record.task_id,
+                prompt=prompt,
+            )
+        except Exception as exc:
+            logger.warning("[aiimg] 任务 %s 登记图片记忆失败：%s", record.task_id, exc)
+            return []
+        logger.info(
+            "[aiimg] 任务 %s 已登记 %d 张图片记忆：%s",
+            record.task_id,
+            len(refs),
+            "、".join(refs),
+        )
+        return refs
 
     def _visible(self, event: Any, record: TaskRecord) -> bool:
         """Whether this session may look at that record.
@@ -1947,6 +2187,21 @@ class AIImagePlugin(BasePlugin):
             # Never fetch a URL ourselves: the framework already materialises
             # attachments, so a URL argument just means "the picture I sent".
             return await self._first_attached_image(event)
+        if lowered.startswith("img-"):
+            if self._memory is None:
+                return None
+            try:
+                found = self._memory.resolve(
+                    text, sid=getattr(event, "sid", ""), scoped=self._scoped()
+                )
+            except Exception as exc:
+                logger.warning("[aiimg] 按编号取输入图失败 %s：%s", text, exc)
+                return None
+            if not found:
+                logger.info("[aiimg] 输入图编号 %s 不在这个会话或已失效", text)
+                return None
+            logger.info("[aiimg] 输入图来自编号 %s：%s", text, Path(found).name)
+            return Path(found)
         path = Path(text)
         return path if path.exists() else None
 
@@ -2188,6 +2443,15 @@ class AIImagePlugin(BasePlugin):
                 logger.info("[aiimg] 视频任务 %s 没有开场帧，直接用参考图", record.task_id)
         last_error = ""
         upcoming = [item["provider"] for item in chain_items]
+        logger.info(
+            "[aiimg] 视频任务 %s 开始生成：提示词=%s，服务商顺序=%s，关键帧=%s，时长=%s，比例=%s",
+            record.task_id,
+            clip(record.prompt, 60) or "-",
+            " → ".join(upcoming) or "-",
+            Path(source_path).name if source_path else "无",
+            record.extra.get("seconds") or "-",
+            record.extra.get("aspect_ratio") or "-",
+        )
         for index, item in enumerate(chain_items):
             provider_id = item["provider"]
             if self._skip_cooling(provider_id, upcoming[index + 1 :]):
@@ -2240,9 +2504,16 @@ class AIImagePlugin(BasePlugin):
                     result.size or "-",
                     result.duration or "-",
                 )
+                refs = self._remember_media(
+                    [str(video_path)],
+                    record=record,
+                    kind="video",
+                    prompt=record.prompt or "",
+                )
                 return {
                     "media": [str(video_path)],
                     "url": "",
+                    "refs": refs,
                     "provider": provider_id,
                     "model": result.model,
                     "size": result.size,
@@ -2283,6 +2554,15 @@ class AIImagePlugin(BasePlugin):
         ]
         last_error = ""
         upcoming = [item["provider"] for item in chain_items]
+        logger.info(
+            "[aiimg] 任务 %s 开始出图：类型=%s，提示词=%s，尺寸=%s，服务商顺序=%s，输入图 %d 张",
+            record.task_id,
+            kind or "-",
+            clip(record.prompt, 60) or "-",
+            record.size or "-",
+            " → ".join(upcoming) or "-",
+            len(images or []),
+        )
         for index, item in enumerate(chain_items):
             provider_id = item["provider"]
             if self._skip_cooling(provider_id, upcoming[index + 1 :]):
@@ -2394,8 +2674,15 @@ class AIImagePlugin(BasePlugin):
                     "[aiimg] 任务 %s 服务商 %s 成功，%dms 已保存 %d 张",
                     record.task_id, provider_id, int(cost), len(media),
                 )
+                refs = self._remember_media(
+                    media,
+                    record=record,
+                    kind=gallery_kind,
+                    prompt=final_prompt,
+                )
                 return {
                     "media": media,
+                    "refs": refs,
                     "provider": provider_id,
                     "model": model,
                     "size": size,
@@ -2530,6 +2817,11 @@ class AIImagePlugin(BasePlugin):
             "error": "",
         }
         media = payload.get("media") or []
+        refs = [str(item) for item in (payload.get("refs") or []) if item]
+        if refs:
+            facts["image_ref"] = refs[0]
+            if len(refs) > 1:
+                facts["image_refs"] = "、".join(refs)
         video_url = payload.get("url") or ""
         if video_url:
             elements.append(Video(file=video_url))
@@ -2978,12 +3270,12 @@ class AIImagePlugin(BasePlugin):
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         try:
             timeout = aiohttp.ClientTimeout(total=30)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url, headers=headers) as resp:
-                    text = await resp.text()
-                    if resp.status != 200:
-                        raise HTTPException(502, f"接口返回 {resp.status}，检查地址和密钥")
-                    body = json.loads(text)
+            session = await current_session()
+            async with session.get(url, headers=headers, timeout=timeout) as resp:
+                text = await resp.text()
+                if resp.status != 200:
+                    raise HTTPException(502, f"接口返回 {resp.status}，检查地址和密钥")
+                body = json.loads(text)
         except HTTPException:
             raise
         except Exception as exc:

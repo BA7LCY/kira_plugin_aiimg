@@ -191,6 +191,10 @@ def plugin_module():
         spec.loader.exec_module(module)
         yield module
     finally:
+        # 插件是按别名包加载的，它那份 core.http 与测试进程里的不是同一个模块。
+        http_module = sys.modules.get(f"{package_name}.core.http")
+        if http_module is not None:
+            http_module.close_http_sync()
         for name in list(sys.modules):
             if name == package_name or name.startswith(f"{package_name}."):
                 sys.modules.pop(name, None)
@@ -1812,3 +1816,216 @@ async def test_restart_stops_retrying_a_task_out_of_attempts(plugin_module, tmp_
     assert got.status == "failed"
     assert "重试次数已经用尽" in got.error
     assert called == []
+
+
+def _memory_event(sid: str = "s1"):
+    event = _tool_event()
+    event.sid = sid
+    event.session = types.SimpleNamespace(session_type="dm", session_id=sid)
+    return event
+
+
+def _png(path: Path, payload: bytes = b"png") -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"\x89PNG\r\n\x1a\n" + payload)
+    return path
+
+
+async def _ready_plugin(plugin_module, tmp_path):
+    data_dir = tmp_path / "data"
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _config())
+    await plugin.initialize()
+    return plugin, data_dir
+
+
+async def test_find_image_lists_only_this_session(plugin_module, tmp_path):
+    plugin, data_dir = await _ready_plugin(plugin_module, tmp_path)
+    mine = _png(data_dir / "out" / "a.png")
+    other = _png(data_dir / "out" / "b.png")
+    try:
+        self_ref = plugin._memory.remember(
+            [str(mine)], sid="s1", kind="image", prompt="窗边的猫"
+        )[0]
+        plugin._memory.remember([str(other)], sid="s2", kind="image", prompt="沙发上的狗")
+
+        payload = json.loads(await plugin.find_image(_memory_event("s1")))
+
+        assert payload["status"] == "ok"
+        assert payload["count"] == 1
+        assert payload["images"][0]["image_ref"] == self_ref
+        assert payload["images"][0]["prompt"] == "窗边的猫"
+        assert self_ref.startswith("img-") and len(self_ref) == 10
+
+        wide = json.loads(await plugin.find_image(_memory_event("s1"), query="狗"))
+        assert wide["count"] == 0
+
+        plugin.plugin_cfg["section_access"]["session_scope"] = False
+        everything = json.loads(await plugin.find_image(_memory_event("s1")))
+        assert everything["count"] == 2
+    finally:
+        await plugin.terminate()
+
+
+async def test_find_image_filters_by_kind_and_caps_the_limit(plugin_module, tmp_path):
+    plugin, data_dir = await _ready_plugin(plugin_module, tmp_path)
+    try:
+        images = [_png(data_dir / "out" / f"{i}.png", str(i).encode()) for i in range(3)]
+        plugin._memory.remember([str(path) for path in images], sid="s1", kind="image")
+        plugin._memory.remember([str(images[0])], sid="s1", kind="video")
+
+        videos = json.loads(await plugin.find_image(_memory_event("s1"), kind="video", limit=99))
+        assert [row["kind"] for row in videos["images"]] == ["video"]
+
+        capped = json.loads(await plugin.find_image(_memory_event("s1"), limit=99))
+        assert capped["count"] <= 20
+    finally:
+        await plugin.terminate()
+
+
+async def test_resend_image_by_ref_sends_the_remembered_file(plugin_module, tmp_path):
+    plugin, data_dir = await _ready_plugin(plugin_module, tmp_path)
+    photo = _png(data_dir / "out" / "a.png")
+    sent = []
+
+    async def fake_send(sid, chain):
+        sent.append((sid, chain))
+        return True
+
+    plugin._safe_send = fake_send
+    try:
+        ref = plugin._memory.remember([str(photo)], sid="s1", kind="image")[0]
+
+        payload = json.loads(await plugin.resend_image(_memory_event("s1"), image_ref=ref))
+
+        assert payload == {"status": "resent", "image_ref": ref, "kind": "image"}
+        assert sent and sent[0][0] == "s1"
+        assert sent[0][1][0].kw["image"] == str(photo)
+    finally:
+        await plugin.terminate()
+
+
+async def test_resend_image_reports_unknown_or_foreign_refs(plugin_module, tmp_path):
+    plugin, data_dir = await _ready_plugin(plugin_module, tmp_path)
+    photo = _png(data_dir / "out" / "a.png")
+    sent = []
+
+    async def fake_send(sid, chain):
+        sent.append(sid)
+        return True
+
+    plugin._safe_send = fake_send
+    try:
+        ref = plugin._memory.remember([str(photo)], sid="s2", kind="image")[0]
+
+        missing = json.loads(await plugin.resend_image(_memory_event("s1"), image_ref="img-000000"))
+        foreign = json.loads(await plugin.resend_image(_memory_event("s1"), image_ref=ref))
+
+        assert missing == {"status": "missing", "image_ref": "img-000000"}
+        assert foreign == {"status": "missing", "image_ref": ref}
+        assert sent == []
+    finally:
+        await plugin.terminate()
+
+
+async def test_save_inspiration_obeys_the_whitelist(plugin_module, tmp_path):
+    plugin, _ = await _ready_plugin(plugin_module, tmp_path)
+    try:
+        access = plugin.plugin_cfg["section_access"]
+        access["whitelist"] = ["u2"]
+
+        denied = json.loads(
+            await plugin.save_inspiration(_memory_event("s1"), "雨夜霓虹", tags="夜景 街头")
+        )
+        assert denied["status"] == "denied"
+        assert denied["reason"] == "白名单"
+        assert len(plugin._inspiration) == 0
+
+        access["whitelist"] = ""
+        saved = json.loads(
+            await plugin.save_inspiration(_memory_event("s1"), "雨夜霓虹", tags="夜景 街头")
+        )
+        assert saved["status"] == "saved"
+        assert saved["tags"] == ["夜景", "街头"]
+        assert len(plugin._inspiration) == 1
+
+        empty = json.loads(await plugin.save_inspiration(_memory_event("s1"), "   "))
+        assert empty["reason"] == "内容为空"
+    finally:
+        await plugin.terminate()
+
+
+async def test_pick_inspiration_returns_saved_ideas(plugin_module, tmp_path):
+    plugin, _ = await _ready_plugin(plugin_module, tmp_path)
+    try:
+        plugin._inspiration.add("海边灯塔", tags=["海"], sid="s1")
+        plugin._inspiration.add("旧城天台", tags=["城"], sid="s2")
+
+        payload = json.loads(await plugin.pick_inspiration(_memory_event("s1"), count=5))
+
+        assert payload["status"] == "ok"
+        assert payload["count"] == 1
+        assert payload["ideas"][0]["text"] == "海边灯塔"
+        assert payload["ideas"][0]["id"]
+    finally:
+        await plugin.terminate()
+
+
+async def test_hide_unavailable_tools_keeps_read_only_ones(plugin_module, tmp_path):
+    plugin, _ = await _ready_plugin(plugin_module, tmp_path)
+    try:
+        plugin.plugin_cfg["section_access"]["whitelist"] = ["u2"]
+
+        class _Req:
+            tool_set = set(plugin_module.TOOL_NAMES)
+
+        req = _Req()
+        await plugin._hide_unavailable_tools(_memory_event("s1"), req)
+
+        assert "generate_image" not in req.tool_set
+        assert "save_inspiration" not in req.tool_set
+        assert {"get_task_status", "resend_image", "find_image", "pick_inspiration"} <= req.tool_set
+    finally:
+        await plugin.terminate()
+
+
+async def test_remember_media_returns_refs_for_finished_tasks(plugin_module, tmp_path):
+    plugin, data_dir = await _ready_plugin(plugin_module, tmp_path)
+    try:
+        record = plugin._store.create(kind="generate_image", user_id="u1", prompt="猫", sid="s1")
+        photo = _png(data_dir / "out" / "a.png")
+
+        refs = plugin._remember_media(
+            [str(photo)], record=record, kind="image", prompt="窗边的猫"
+        )
+
+        assert len(refs) == 1
+        assert plugin._memory.resolve(refs[0], sid="s1", scoped=True) == str(photo)
+    finally:
+        await plugin.terminate()
+
+
+async def test_input_image_accepts_a_remembered_ref(plugin_module, tmp_path):
+    plugin, data_dir = await _ready_plugin(plugin_module, tmp_path)
+    photo = _png(data_dir / "out" / "a.png")
+    try:
+        ref = plugin._memory.remember([str(photo)], sid="s1", kind="image")[0]
+
+        resolved = await plugin._resolve_input_image(_memory_event("s1"), ref)
+
+        assert resolved == photo
+    finally:
+        await plugin.terminate()
+
+
+async def test_input_image_ignores_refs_from_another_session(plugin_module, tmp_path):
+    plugin, data_dir = await _ready_plugin(plugin_module, tmp_path)
+    photo = _png(data_dir / "out" / "a.png")
+    try:
+        ref = plugin._memory.remember([str(photo)], sid="s2", kind="image")[0]
+
+        assert await plugin._resolve_input_image(_memory_event("s1"), ref) is None
+
+        plugin.plugin_cfg["section_access"]["session_scope"] = False
+        assert await plugin._resolve_input_image(_memory_event("s1"), ref) == photo
+    finally:
+        await plugin.terminate()

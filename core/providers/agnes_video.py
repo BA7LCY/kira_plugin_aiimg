@@ -19,6 +19,7 @@ from urllib.parse import quote, urlsplit
 
 import aiohttp
 
+from ..http import current_session
 from ..image_format import guess_image_mime_and_ext
 from ..logbook import get_logger
 from .base import ProviderSettings, VideoBackend, VideoResult
@@ -125,14 +126,11 @@ class AgnesVideoService(VideoBackend):
         self._session: aiohttp.ClientSession | None = None
 
     async def _session_get(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=max(1, int(self.request_timeout)))
-            self._session = aiohttp.ClientSession(timeout=timeout)
-        return self._session
+        # 和图片服务商共用同一个连接池，长驻进程里省掉反复握手。
+        return await current_session()
 
     async def close(self) -> None:
-        if self._session is not None and not self._session.closed:
-            await self._session.close()
+        # 共享会话由插件统一关闭，这里只清掉引用。
         self._session = None
 
     # -- rate limit ---------------------------------------------------------

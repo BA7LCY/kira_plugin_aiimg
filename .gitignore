@@ -4,6 +4,7 @@ __pycache__/
 .testdeps/
 .pytest_tmp/
 .tmp/
+_tmp/
 _compile_check.py
 *.zip
 
