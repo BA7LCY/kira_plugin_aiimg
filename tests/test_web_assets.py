@@ -309,6 +309,27 @@ def test_access_whitelist_uses_the_list_item_editor():
     assert '"data-list-title": options.title' in script
 
 
+def test_result_origin_allowlist_uses_the_list_item_editor():
+    script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert (
+        'if (sectionKey === "section_advanced" && field === "trusted_result_origins")'
+        in script
+    )
+
+
+def test_preset_editor_button_sits_next_to_the_chip():
+    script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    start = script.index("function presetField(")
+    body = script[start : script.index("function ", start + 10)]
+
+    # No spacer: the button follows the chip inside the row.
+    assert 'el("span", { class: "spacer" })' not in body
+    assert "chip-add" in body
+    assert body.count("row.append(") >= 2
+    assert "presets-edit" in body
+
+
 def test_advanced_section_exposes_network_and_encoding_knobs():
     schema = json.loads((WEB_DIR.parent / "schema.json").read_text(encoding="utf-8"))
     fields = schema["section_advanced"]["fields"]

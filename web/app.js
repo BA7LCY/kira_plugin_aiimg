@@ -1930,20 +1930,7 @@ function presetField(sectionKey, field, item, value) {
     el(
       "div",
       { class: "field-head" },
-      el("label", {}, item.name || "预设提示词"),
-      el("span", { class: "spacer" }),
-      el(
-        "button",
-        {
-          class: "btn small ghost",
-          type: "button",
-          "data-action": "presets-edit",
-          "data-section": sectionKey,
-          "data-section-field": field,
-        },
-        iconNode("plus"),
-        "添加更多"
-      )
+      el("label", {}, item.name || "预设提示词")
     )
   );
   const row = el("div", { class: "preset-row" });
@@ -1961,6 +1948,20 @@ function presetField(sectionKey, field, item, value) {
       row.append(el("span", { class: "chip chip-more" }, `+${presets.length - 1}`));
     }
   }
+  row.append(
+    el(
+      "button",
+      {
+        class: "btn small ghost chip-add",
+        type: "button",
+        "data-action": "presets-edit",
+        "data-section": sectionKey,
+        "data-section-field": field,
+      },
+      iconNode(presets.length ? "edit" : "plus"),
+      presets.length ? "编辑" : "添加"
+    )
+  );
   wrap.append(row);
   if (item.hint) wrap.append(el("div", { class: "hint" }, item.hint));
   return wrap;
@@ -2669,6 +2670,9 @@ function sectionInput(sectionKey, field, item, value) {
     return presetField(sectionKey, field, item, value);
   }
   if (sectionKey === "section_access" && field === "whitelist") {
+    return listField(sectionKey, field, item, value);
+  }
+  if (sectionKey === "section_advanced" && field === "trusted_result_origins") {
     return listField(sectionKey, field, item, value);
   }
   const wide = ["textarea", "list", "json", "editor", "markdown"].includes(kind);

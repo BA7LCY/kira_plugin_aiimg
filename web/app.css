@@ -1783,6 +1783,13 @@ table.data .mono {
   min-height: 34px;
 }
 
+.preset-row .chip-add {
+  height: 26px;
+  padding: 0 8px 0 6px;
+  gap: 4px;
+  font-size: 12px;
+}
+
 .chip {
   display: inline-flex;
   align-items: center;
