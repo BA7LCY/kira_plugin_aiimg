@@ -22,7 +22,13 @@ def guess_image_mime_and_ext(image_bytes: bytes) -> tuple[str, str]:
     return "image/jpeg", "jpg"
 
 
-def validate_image_bytes(data: bytes, max_bytes: int | None = None) -> None:
+# 解码前先按像素挡一道，避免压缩得很小的图把内存撑爆。
+MAX_PIXELS = 50_000_000
+
+
+def validate_image_bytes(
+    data: bytes, max_bytes: int | None = None, *, max_pixels: int = MAX_PIXELS
+) -> None:
     cap = max_bytes if max_bytes else 24 * 1024 * 1024
     if not data:
         raise ValueError("图片内容为空")
@@ -32,10 +38,16 @@ def validate_image_bytes(data: bytes, max_bytes: int | None = None) -> None:
         from PIL import Image as PILImage
 
         with PILImage.open(io.BytesIO(data)) as image:
+            width, height = image.size
+        if max_pixels and width * height > max_pixels:
+            raise ValueError(f"图片尺寸太大：{width}x{height}")
+        with PILImage.open(io.BytesIO(data)) as image:
             image.verify()
         # Verification alone does not decode JPEG/WebP pixel data.
         with PILImage.open(io.BytesIO(data)) as image:
             image.load()
+    except ValueError:
+        raise
     except Exception as exc:
         raise ValueError("返回内容不是有效图片") from exc
 

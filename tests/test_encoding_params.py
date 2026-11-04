@@ -109,3 +109,13 @@ def test_validate_image_bytes_respects_the_custom_cap():
 
     with pytest.raises(ValueError, match="MB"):
         validate_image_bytes(data, max_bytes=len(data) - 1)
+
+
+def test_validate_image_bytes_rejects_a_pixel_bomb():
+    from core.image_format import validate_image_bytes
+
+    data = _png(64, 64)
+    validate_image_bytes(data, max_pixels=64 * 64)
+
+    with pytest.raises(ValueError, match="尺寸太大"):
+        validate_image_bytes(data, max_pixels=64 * 64 - 1)

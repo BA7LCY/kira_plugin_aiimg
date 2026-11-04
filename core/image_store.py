@@ -49,6 +49,9 @@ class ImageStore:
             check_same_thread=False,
         )
         self._db.row_factory = sqlite3.Row
+        # WAL 下读不挡写：后台任务写库时，画廊列表照样能查。
+        self._db.execute("PRAGMA journal_mode=WAL")
+        self._db.execute("PRAGMA synchronous=NORMAL")
         self._db.execute(
             """
             CREATE TABLE IF NOT EXISTS images (

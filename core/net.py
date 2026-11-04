@@ -90,3 +90,42 @@ async def ensure_url_allowed(url: str, policy: URLFetchPolicy) -> None:
         ):
             continue
         raise ValueError("图片地址不允许指向内网")
+
+
+def peer_address(response: object) -> str:
+    """Actual peer IP of a live HTTP response connection, or ""."""
+    connection = getattr(response, "connection", None)
+    transport = getattr(connection, "transport", None) if connection is not None else None
+    peer = transport.get_extra_info("peername") if transport is not None else None
+    if not peer:
+        return ""
+    return str(peer[0] if isinstance(peer, (tuple, list)) else peer)
+
+
+async def ensure_peer_allowed(
+    response: object, url: str, policy: URLFetchPolicy
+) -> None:
+    """Re-check the address that was actually connected to.
+
+    ``ensure_url_allowed`` resolves the name first; a hostname could still
+    resolve to something else by the time the socket connects. Comparing the
+    peer address closes that window for result downloads.
+    """
+    current_origin = origin(str(url))
+    if current_origin and current_origin in policy.trusted_origins:
+        return
+    if (
+        current_origin
+        and policy.allow_private_result_origins
+        and current_origin in policy.trusted_result_origins
+    ):
+        return
+    address = peer_address(response)
+    if not address:
+        return
+    try:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])
+    except ValueError:
+        return
+    if not ip.is_global:
+        raise ValueError("图片地址实际连接到内网")

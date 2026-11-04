@@ -6,7 +6,12 @@ import socket
 
 import pytest
 
-from core.net import URLFetchPolicy, ensure_url_allowed, origin
+from core.net import (
+    URLFetchPolicy,
+    ensure_peer_allowed,
+    ensure_url_allowed,
+    origin,
+)
 
 PUBLIC = "93.184.216.34"
 PRIVATE = "10.1.2.3"
@@ -90,3 +95,55 @@ async def test_non_http_scheme_is_rejected():
 def test_origin_normalises_trailing_slash_and_path():
     assert origin("https://files.internal/a/b.png?x=1") == "https://files.internal"
     assert origin("") == ""
+
+
+class _Conn:
+    def __init__(self, peer):
+        self.transport = _Transport(peer)
+
+
+class _Transport:
+    def __init__(self, peer):
+        self._peer = peer
+
+    def get_extra_info(self, name):
+        return self._peer if name == "peername" else None
+
+
+class _Response:
+    def __init__(self, peer):
+        self.connection = _Conn(peer) if peer else None
+
+
+@pytest.mark.asyncio
+async def test_peer_check_passes_for_a_public_address():
+    await ensure_peer_allowed(
+        _Response((PUBLIC, 443)), "https://cdn.example.com/a.png", URLFetchPolicy()
+    )
+
+
+@pytest.mark.asyncio
+async def test_peer_check_blocks_a_rebound_host():
+    """The name resolved public, but the socket landed on a private address."""
+    with pytest.raises(ValueError, match="内网"):
+        await ensure_peer_allowed(
+            _Response((PRIVATE, 443)),
+            "https://cdn.example.com/a.png",
+            URLFetchPolicy(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_peer_check_respects_the_private_result_switch():
+    policy = URLFetchPolicy(
+        trusted_result_origins=frozenset({"https://files.internal"}),
+        allow_private_result_origins=True,
+    )
+    await ensure_peer_allowed(
+        _Response((PRIVATE, 443)), "https://files.internal/a.png", policy
+    )
+
+
+@pytest.mark.asyncio
+async def test_peer_check_skips_unknown_peers():
+    await ensure_peer_allowed(_Response(None), "https://cdn.example.com/a", URLFetchPolicy())

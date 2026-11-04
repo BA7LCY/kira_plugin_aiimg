@@ -588,6 +588,25 @@ async def test_api_config_returns_editable_payload(plugin_module, tmp_path):
     assert payload["status"]["ready"] is False
 
 
+async def test_api_config_masks_provider_keys(plugin_module, tmp_path):
+    config = _compat_config()
+    config["providers"] = [
+        {
+            "id": "p1",
+            "api_keys": ["sk-real-key-1234567890abcdef"],
+            "model": "gpt-image-2",
+        }
+    ]
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
+    plugin._registry = _Registry()
+
+    payload = await plugin.api_config()
+
+    shown = payload["config"]["providers"][0]["api_keys"][0]
+    assert shown == "sk-r…cdef"
+    assert "1234567890" not in shown
+
+
 async def test_api_config_lite_skips_the_live_numbers(plugin_module, tmp_path):
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), _compat_config())
     plugin._registry = _Registry()
@@ -754,6 +773,22 @@ async def test_uploaded_reference_round_trip(plugin_module, tmp_path):
         listed = await plugin.api_files()
         assert listed["files"][0]["exists"] is True
         assert listed["mode"] == "files"
+    finally:
+        await plugin.terminate()
+
+
+async def test_upload_rejects_an_oversized_payload(plugin_module, tmp_path):
+    plugin = plugin_module.AIImagePlugin(
+        _Ctx(tmp_path / "data"),
+        _compat_config(selfie_use_persona=False, selfie_reference_files=[]),
+    )
+    await plugin.initialize()
+    try:
+        result = await plugin.api_files_upload(
+            {"name": "big.png", "data_url": "A" * (15 * 1024 * 1024)}
+        )
+        assert result["ok"] is False
+        assert "10MB" in result["error"]
     finally:
         await plugin.terminate()
 

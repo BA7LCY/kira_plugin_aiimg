@@ -606,6 +606,89 @@ def revision(config: dict | None) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+_KEY_MASK = "…"
+
+
+def mask_key(value: str) -> str:
+    """Turn one API key into a form that can be shown without leaking it."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if len(text) >= 20:
+        return f"{text[:4]}{_KEY_MASK}{text[-4:]}"
+    if len(text) >= 9:
+        return f"{text[:2]}{_KEY_MASK}{text[-2:]}"
+    return _KEY_MASK
+
+
+def mask_providers(config: dict | None) -> dict[str, Any]:
+    """Copy of the config whose provider keys are masked for the settings page."""
+    result = copy.deepcopy(config or {})
+    providers = result.get("providers")
+    if not isinstance(providers, list):
+        return result
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        keys = provider.get("api_keys")
+        if isinstance(keys, list):
+            provider["api_keys"] = [mask_key(key) for key in keys]
+    return result
+
+
+def restore_keys(incoming: dict | None, current: dict | None) -> dict[str, Any]:
+    """Put stored keys back where the page sent back an unchanged mask.
+
+    The settings page never receives a plain key, so a save carries the mask
+    it was shown. Any value that still matches a stored key's mask keeps the
+    stored key; anything else (new key, edited key) is taken as typed.
+    """
+    result = copy.deepcopy(incoming or {})
+    stored = {
+        str(provider.get("id") or ""): [
+            str(key) for key in (provider.get("api_keys") or [])
+        ]
+        for provider in (current or {}).get("providers") or []
+        if isinstance(provider, dict)
+    }
+    providers = result.get("providers")
+    if not isinstance(providers, list):
+        return result
+    for provider in providers:
+        if not isinstance(provider, dict):
+            continue
+        raw = provider.get("api_keys")
+        if not isinstance(raw, list):
+            continue
+        originals = stored.get(str(provider.get("id") or ""), [])
+        masked = [mask_key(key) for key in originals]
+        restored: list[str] = []
+        for index, value in enumerate(raw):
+            text = str(value)
+            original = None
+            if index < len(masked) and text == masked[index]:
+                original = originals[index]
+            elif text in masked:
+                original = originals[masked.index(text)]
+            restored.append(original if original is not None else text)
+        provider["api_keys"] = restored
+    return result
+
+
+def unmask_key(value: str, config: dict | None) -> str:
+    """Map a single masked key back to the stored one, for one-off requests."""
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    for provider in (config or {}).get("providers") or []:
+        if not isinstance(provider, dict):
+            continue
+        for key in provider.get("api_keys") or []:
+            if mask_key(key) == text:
+                return str(key)
+    return text
+
+
 def template_catalog() -> list[dict[str, Any]]:
     return [copy.deepcopy(item) for item in TEMPLATE_CATALOG]
 

@@ -3121,9 +3121,13 @@ class AIImagePlugin(BasePlugin):
             logger.exception("[aiimg] 配置读进来后补默认值失败，先用原始内容")
             merged = dict(cfg or {})
         templates = settings_mod.template_catalog()
+        logger.info(
+            "[aiimg] 下发配置：服务商 %d 家，密钥只给掩码",
+            len(merged.get("providers") or []),
+        )
         payload = {
             "revision": settings_mod.revision(cfg),
-            "config": merged,
+            "config": settings_mod.mask_providers(merged),
             "sections": settings_mod.sections(),
             "templates": templates,
             "fields": settings_mod.field_meta(),
@@ -3204,6 +3208,8 @@ class AIImagePlugin(BasePlugin):
             try:
                 submitted = data.get("config")
                 incoming = submitted if isinstance(submitted, dict) else {}
+                incoming = settings_mod.restore_keys(incoming, current)
+                logger.info("[aiimg] 保存配置：页面上的掩码密钥已换回本机保存的密钥")
                 merged = self._merge_config(current, incoming)
                 config = settings_mod.normalize(merged)
             except ValueError as exc:
@@ -3245,7 +3251,9 @@ class AIImagePlugin(BasePlugin):
                 status = self._status_payload()
             return {
                 "revision": settings_mod.revision(config_now),
-                "config": settings_mod.with_defaults(config_now),
+                "config": settings_mod.mask_providers(
+                    settings_mod.with_defaults(config_now)
+                ),
                 "status": status,
                 "notes": settings_mod.warnings(config_now),
             }
@@ -3258,6 +3266,9 @@ class AIImagePlugin(BasePlugin):
         base_url = str(data.get("base_url") or "").strip()
         api_key = str(data.get("api_key") or "").strip()
         server_url = str(data.get("server_url") or "").strip()
+        if api_key:
+            # 设置页只会看到掩码，拉模型时把它换回真正的密钥
+            api_key = settings_mod.unmask_key(api_key, self.plugin_cfg)
         root = base_url or server_url
         if not root:
             raise HTTPException(400, "先填好接口地址再获取模型")
@@ -3606,7 +3617,17 @@ class AIImagePlugin(BasePlugin):
         body = payload if isinstance(payload, dict) else {}
         name = str(body.get("name") or "")
         data_url = str(body.get("data_url") or "")
-        data = decode_base64_image(data_url or "")
+        # 先按字符串长度挡一道，超大内容不进入解码。
+        if len(data_url) > 14 * 1024 * 1024:
+            logger.warning(
+                "[aiimg] 上传参考图被挡：内容 %.1f MB，超过 10MB 上限",
+                len(data_url) / (1024 * 1024),
+            )
+            return {"ok": False, "error": "单张参考图不要超过 10MB"}
+        try:
+            data = decode_base64_image(data_url)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc) or "只支持 jpg、png、webp"}
         if not data:
             return {"ok": False, "error": "没有读到图片内容"}
         if len(data) > 10 * 1024 * 1024:

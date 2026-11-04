@@ -14,7 +14,7 @@ from urllib.parse import urljoin, urlsplit
 import aiohttp
 
 from .http import current_session
-from .net import URLFetchPolicy, ensure_url_allowed, origin
+from .net import URLFetchPolicy, ensure_peer_allowed, ensure_url_allowed, origin
 
 MAX_VIDEO_BYTES = 256 * 1024 * 1024
 
@@ -134,6 +134,7 @@ async def _resolve_direct_url(
             allow_redirects=False,
             timeout=timeout,
         ) as resp:
+            await ensure_peer_allowed(resp, current, policy)
             if resp.status in _REDIRECT_STATUSES:
                 location = (resp.headers.get("Location") or "").strip()
                 if not location:
@@ -180,6 +181,7 @@ async def _probe(
         allow_redirects=False,
         timeout=timeout,
     ) as resp:
+        await ensure_peer_allowed(resp, url, policy)
         if resp.status != 206:
             return 0, ""
         match = _RANGE_PATTERN.fullmatch((resp.headers.get("Content-Range") or "").strip())
@@ -226,6 +228,7 @@ async def _download_ranges(
                     allow_redirects=False,
                     timeout=timeout,
                 ) as resp:
+                    await ensure_peer_allowed(resp, url, policy)
                     if resp.status != 206:
                         raise RuntimeError(f"视频分片下载失败: HTTP {resp.status}")
                     async for chunk in resp.content.iter_chunked(64 * 1024):
@@ -296,6 +299,7 @@ async def _download_stream(
                 await ensure_url_allowed(current, policy)
                 async with session.get(current, headers=request_headers or None,
                                        allow_redirects=False, timeout=timeout) as resp:
+                    await ensure_peer_allowed(resp, current, policy)
                     if resp.status in _REDIRECT_STATUSES:
                         redirects += 1
                         if redirects > _MAX_REDIRECTS:

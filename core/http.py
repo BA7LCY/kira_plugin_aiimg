@@ -21,7 +21,7 @@ import aiohttp
 
 from .image_format import validate_image_bytes
 from .logbook import clip, get_logger, mask
-from .net import URLFetchPolicy, ensure_url_allowed
+from .net import URLFetchPolicy, ensure_peer_allowed, ensure_url_allowed
 
 logger = get_logger("http")
 
@@ -353,6 +353,8 @@ class ProviderHTTP:
             async with session.get(
                 current_url, allow_redirects=False, timeout=timeout
             ) as response:
+                # 连上之后再核对一次对端地址，挡住解析结果被换掉的情况
+                await ensure_peer_allowed(response, current_url, self.policy)
                 if follow_redirects and response.status in _REDIRECT_STATUSES:
                     location = (response.headers.get("Location") or "").strip()
                     if not location:

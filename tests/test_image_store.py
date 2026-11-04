@@ -37,6 +37,13 @@ def test_save_and_get(tmp_path):
     _close(store)
 
 
+def test_gallery_uses_write_ahead_logging(tmp_path):
+    store = ImageStore(tmp_path, {})
+    mode = store._db.execute("PRAGMA journal_mode").fetchone()[0]
+    assert str(mode).lower() == "wal"
+    _close(store)
+
+
 def test_video_budget_is_separate_from_images(tmp_path):
     store = ImageStore(tmp_path, {"gallery": {"max_count": 1, "video_max_count": 1}})
     image = _save(store)
