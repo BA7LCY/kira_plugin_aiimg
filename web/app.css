@@ -663,28 +663,24 @@ html[data-theme="dark"] .note.warn {
   font-family: var(--mono);
 }
 
-/* Numeric knobs read as one compact row: label left, value right. */
+/* Numeric knobs: the value sits right under its label, so a narrow window
+   never pushes the box away to the far edge of the row. */
 .field.compact {
-  flex-direction: row;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px 12px;
+  gap: 5px;
   padding: 1px 0;
 }
 
 .field.compact > label {
-  flex: 1 1 auto;
-  min-width: 0;
+  flex: none;
 }
 
-.field.compact input[type="number"] {
-  flex: none;
-  width: 88px;
-  text-align: right;
+.field.compact input[type="number"],
+.field.compact select {
+  width: 190px;
 }
 
 .field.compact .hint {
-  flex: 1 1 100%;
+  margin-top: 1px;
 }
 
 /* Textareas size themselves to their content; see fitTextarea(). */

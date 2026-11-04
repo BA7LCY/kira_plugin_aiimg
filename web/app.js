@@ -2676,7 +2676,7 @@ function sectionInput(sectionKey, field, item, value) {
     return listField(sectionKey, field, item, value);
   }
   const wide = ["textarea", "list", "json", "editor", "markdown"].includes(kind);
-  const compact = kind === "integer" || kind === "float";
+  const compact = kind === "integer" || kind === "float" || kind === "select";
   const wrap = el("div", { class: `field${wide ? " wide" : ""}${compact ? " compact" : ""}` });
   wrap.append(el("label", {}, item.name || field));
   let control;

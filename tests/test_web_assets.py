@@ -282,8 +282,8 @@ def test_settings_form_tightens_numbers_and_autosizes_textareas():
     script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
     css = (WEB_DIR / "app.css").read_text(encoding="utf-8")
 
-    # Integer and float knobs share one row; every section gets the same treatment.
-    assert 'const compact = kind === "integer" || kind === "float";' in script
+    # Number and dropdown knobs stack their value right under the label.
+    assert 'const compact = kind === "integer" || kind === "float" || kind === "select";' in script
     assert '${compact ? " compact" : ""}' in script
     assert 'class: `field${wide ? " wide" : ""}' in script
     # Textareas grow with their content between a floor and a ceiling.
@@ -294,8 +294,14 @@ def test_settings_form_tightens_numbers_and_autosizes_textareas():
     assert '"data-autosize": "1"' in script
     assert "fitTextareas(view);" in script
 
-    for selector in (".field.compact", '.field.compact input[type="number"]', ".field textarea.grow"):
+    for selector in (
+        ".field.compact",
+        '.field.compact input[type="number"]',
+        ".field.compact select",
+        ".field textarea.grow",
+    ):
         assert selector in css
+    assert "flex-direction: row" not in css.split(".field.compact {")[1].split("}")[0]
 
 
 def test_access_whitelist_uses_the_list_item_editor():
