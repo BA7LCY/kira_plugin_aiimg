@@ -82,12 +82,8 @@ _ERROR_MARKER = "_aiimg_task_error"
 # How long a submitted task may still be waiting for its acknowledgement.
 _ACK_WATCH_TTL = 300.0
 
-# Uploads under refs/ are the only source of selfie reference photos, but the
-# provider request itself caps how many images can be attached at once.
-MAX_REFERENCE_IMAGES = 8
-
 # Pictures taken straight from the conversation; the rest of the budget stays
-# free for role-tagged reference uploads.
+# free for role-tagged reference uploads. The hard cap lives in refbridge.
 _ATTACHMENT_LIMIT = 4
 
 PLUGIN_ID = "kira_plugin_aiimg"
@@ -3124,13 +3120,6 @@ class AIImagePlugin(BasePlugin):
             if role not in wanted:
                 wanted.append(role)
         return wanted
-
-    @staticmethod
-    def _too_many_references(count: int) -> str:
-        return (
-            f"参考图最多 {MAX_REFERENCE_IMAGES} 张，现在有 {count} 张："
-            "请减少上传的参考图，或用 reference_roles 只挑需要的角色。"
-        )
 
     def _ref_items(self) -> list[dict]:
         items = []
