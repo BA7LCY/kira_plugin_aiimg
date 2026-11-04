@@ -235,18 +235,78 @@ def test_tasks_page_filters_and_retries_failed_jobs():
     assert "已重新入队" in script
 
 
-def test_api_keys_offer_bulk_paste():
+def test_api_keys_use_the_list_item_editor():
     script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
     css = (WEB_DIR / "app.css").read_text(encoding="utf-8")
 
-    assert "function openKeysBulk()" in script
-    assert '"data-action": "keys-bulk"' in script
-    assert "if (action === \"keys-bulk\")" in script
-    assert "每行一把密钥" in script
-    # Duplicates collapse instead of piling up in the pool.
-    assert "const seen = new Set(existing);" in script
-    for selector in (".keys-row", ".keys-bulk-area"):
+    assert "function providerKeysField(provider)" in script
+    assert "return providerKeysField(provider);" in script
+    assert 'title: `${fieldLabel("api_keys")}列表`' in script
+    # The editor adds one item per Enter press and can take a pasted block.
+    assert "function openListEditor(options)" in script
+    assert "function openListImport(options)" in script
+    assert "输入一项后按回车添加" in script
+    assert "空行会自动跳过" in script
+    assert 'if (action === "list-edit")' in script
+    assert "if (!draft.includes(text)) draft.push(text);" in script
+    # Enter keeps the caret in the box, drops the row into view and trims duplicates.
+    assert "addInput.focus();" in script
+    assert "grid.scrollTop = grid.scrollHeight;" in script
+    assert "function normalizeListItems(items)" in script
+    # Escape closes the dialog, Ctrl / Cmd + Enter commits the pasted block.
+    assert 'event.key !== "Escape"' in script
+    assert "event.ctrlKey || event.metaKey" in script
+    assert 'title: "删除这一项"' in script
+    for selector in (
+        ".compose",
+        ".compose-input",
+        ".compose-send",
+        ".entry-grid",
+        ".entry",
+        ".entry-no",
+        ".entry-text",
+        ".entry-drop",
+        ".entry-hollow",
+        ".paste-shell",
+        ".paste-head",
+        ".paste-count",
+        ".paste-area",
+    ):
         assert selector in css
+
+    # The scrollbar gets its own gutter so it never sits on top of the text.
+    assert "scrollbar-gutter: stable" in css
+
+
+def test_settings_form_tightens_numbers_and_autosizes_textareas():
+    script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    css = (WEB_DIR / "app.css").read_text(encoding="utf-8")
+
+    # Integer and float knobs share one row; every section gets the same treatment.
+    assert 'const compact = kind === "integer" || kind === "float";' in script
+    assert '${compact ? " compact" : ""}' in script
+    assert 'class: `field${wide ? " wide" : ""}' in script
+    # Textareas grow with their content between a floor and a ceiling.
+    assert "const TEXTAREA_MIN = 74;" in script
+    assert "const TEXTAREA_MAX = 320;" in script
+    assert "function fitTextarea(area)" in script
+    assert "function fitTextareas(root)" in script
+    assert '"data-autosize": "1"' in script
+    assert "fitTextareas(view);" in script
+
+    for selector in (".field.compact", '.field.compact input[type="number"]', ".field textarea.grow"):
+        assert selector in css
+
+
+def test_access_whitelist_uses_the_list_item_editor():
+    script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert 'if (sectionKey === "section_access" && field === "whitelist")' in script
+    assert "return listField(sectionKey, field, item, value);" in script
+    assert 'state.config[sectionKey][field] = draft.join("\\n");' in script
+    # The dialog is titled after the field, so the whitelist reads「白名单列表」.
+    assert 'title: label.endsWith("列表") ? label : `${label}列表`' in script
+    assert '"data-list-title": options.title' in script
 
 
 def test_advanced_section_exposes_network_and_encoding_knobs():

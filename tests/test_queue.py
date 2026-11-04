@@ -214,3 +214,65 @@ def test_restart_reschedules_active(tmp_path):
     assert got.status == "failed"
     assert "未注册" in got.error
     store.close()
+
+
+def test_lease_keeps_two_instances_from_running_the_same_task(tmp_path):
+    store, first = _queue(tmp_path, max_running=1, owner="instance-a", lease_seconds=60)
+    second = TaskQueue(store, max_running=1, owner="instance-b", lease_seconds=60)
+    runs = []
+    finished = []
+
+    async def runner(rec):
+        runs.append(rec.task_id)
+        await asyncio.sleep(0.4)
+        return {"media": ["a.png"]}
+
+    async def cb(record):
+        finished.append(record.task_id)
+
+    first.on_finished(cb)
+
+    async def scenario():
+        await first.start()
+        task_id = store.create(kind="generate_image", user_id="u1", prompt="猫").task_id
+        await first.submit(store.get(task_id), runner)
+        await asyncio.sleep(0.1)
+        await second.start()
+        await asyncio.sleep(0.5)
+        await second.stop()
+        await first.stop()
+        return task_id
+
+    task_id = asyncio.run(scenario())
+
+    assert runs == [task_id]
+    assert finished == [task_id]
+    assert store.get(task_id).status == "succeeded"
+    store.close()
+
+
+def test_resume_runner_takes_over_an_interrupted_task(tmp_path):
+    store, q = _queue(tmp_path, max_running=1, owner="instance-a", lease_seconds=60)
+    task_id = store.create(kind="generate_image", user_id="u1", prompt="猫").task_id
+    store.set_status(task_id, "running", provider="p1")
+
+    resumed = []
+
+    async def resume(rec):
+        resumed.append((rec.task_id, rec.attempts))
+        return {"media": ["b.png"]}
+
+    q.on_resume(resume)
+
+    async def scenario():
+        await q.start()
+        await _wait_status(store, task_id, {"succeeded"})
+        await q.stop()
+
+    asyncio.run(scenario())
+
+    assert [task_id] == [item[0] for item in resumed]
+    assert resumed[0][1] >= 1
+    assert store.get(task_id).status == "succeeded"
+    assert store.get(task_id).owner == ""
+    store.close()

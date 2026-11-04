@@ -31,7 +31,9 @@ from core.chat import (
 )
 from core.chat.message_elements import Image, Text, Video
 from core.prompt_manager import Prompt
+from core.provider import LLMRequest
 
+from .core import planner
 from .core import refs as refs_mod
 from .core import settings as settings_mod
 from .core.chains import ChainItem, chain_for
@@ -55,7 +57,7 @@ from .core.provider_registry import ProviderRegistry
 from .core.provider_stats import ProviderStats
 from .core.providers.base import StopProviderChain
 from .core.queue import QueueFullError, TaskQueue, UserLimitError
-from .core.task_store import TaskRecord, TaskStore
+from .core.task_store import TaskRecord, TaskStore, new_owner_id
 from .core.video_file import download_video
 
 # Tool names registered by this plugin; removed from the LLM tool set during
@@ -188,16 +190,6 @@ def _event_elements_kw(adapter: Any) -> dict:
     return {"message_types": elements}
 
 
-def _split_user_key(user_id: str) -> tuple[str, str]:
-    """'adapter:user' -> (adapter, user); otherwise ('', user)."""
-    text = str(user_id or "").strip()
-    if ":" in text:
-        adapter, _, uid = text.partition(":")
-        return adapter.strip(), uid.strip()
-    return "", text
-
-
-
 def _looks_like_image(data: bytes) -> bool:
     """Require a verified, decodable image rather than a magic prefix."""
     try:
@@ -217,6 +209,8 @@ class AIImagePlugin(BasePlugin):
         self._store: TaskStore | None = None
         self._gallery: ImageStore | None = None
         self._queue: TaskQueue | None = None
+        # Identifies this process when several instances share one data dir.
+        self._owner = new_owner_id()
         self._config_lock = asyncio.Lock()
         self._ready = False
         self._builtin_tags_logged = False
@@ -250,6 +244,9 @@ class AIImagePlugin(BasePlugin):
         )
         self._build_queue()
         self._queue.on_finished(self._on_task_finished)
+        restored = self._store.list_active()
+        if restored:
+            logger.info("[aiimg] 发现 %d 个没跑完的任务，接着处理", len(restored))
         await self._queue.start()
         self._prune_old_tasks()
         self._ready = True
@@ -538,7 +535,8 @@ class AIImagePlugin(BasePlugin):
         return self._features(key, fallback) if key else fallback
 
     def _build_queue(self) -> None:
-        section = self._cfg("section_queue")
+        section = self._cfg("section_queue") or {}
+        advanced = self._cfg("section_advanced") or {}
         self._queue = TaskQueue(
             self._store,
             max_running=int(section.get("max_running", 2) or 2),
@@ -546,7 +544,21 @@ class AIImagePlugin(BasePlugin):
             max_user_image_tasks=int(section.get("max_user_image_tasks", 1) or 1),
             max_user_video_tasks=int(section.get("max_user_video_tasks", 1) or 1),
             retention_hours=int(section.get("task_retention_hours", 24) or 24),
+            owner=self._owner,
+            lease_seconds=float(advanced.get("task_lease_seconds", 120) or 120),
         )
+        self._queue.on_resume(self._resume_task)
+
+    async def _resume_task(self, record: TaskRecord) -> dict:
+        """Re-run a task that was interrupted when the process stopped."""
+        limit = int(self._cfg("section_advanced", "task_max_attempts", default=2) or 2)
+        if record.attempts > limit:
+            raise RuntimeError("任务在进程中断前没跑完，重试次数已经用尽")
+        runner, _ = self._task_runner(record.kind)
+        logger.info(
+            "[aiimg] 接手中断的任务 %s（第 %d 次尝试）", record.task_id, record.attempts
+        )
+        return await runner(record)
 
     def _configure_stats(self) -> None:
         section = self._cfg("section_queue") or {}
@@ -636,17 +648,29 @@ class AIImagePlugin(BasePlugin):
     # access control
     # ------------------------------------------------------------------
 
-    def _matches_entry(self, entry: str, keys: list[str]) -> bool:
-        entry_adapter, entry_id = _split_user_key(entry)
-        if not entry_id:
+    @staticmethod
+    def _matches_entry(entry: str, keys: list[str]) -> bool:
+        """Match one whitelist line against the adapter-qualified ids of a sender.
+
+        Accepted shapes: a bare id ("123456"), an adapter-qualified id
+        ("qq:123456"), or a whole session id ("qq:dm:123456"). In the session
+        form the middle segment is a session type, so only the adapter and the
+        trailing id take part in matching.
+        """
+        parts = [part.strip() for part in str(entry or "").split(":") if part.strip()]
+        if not parts:
             return False
+        entry_id = parts[-1]
+        entry_adapter = parts[0] if len(parts) > 1 else ""
         for key in keys:
             if not key:
                 continue
-            if entry_adapter:
-                if key == entry:
-                    return True
-            elif key.split(":", 1)[-1] == entry_id:
+            key_adapter, _, key_id = str(key).partition(":")
+            if not key_id:
+                key_adapter, key_id = "", str(key)
+            if entry_adapter and entry_adapter != key_adapter:
+                continue
+            if entry_id == key_id:
                 return True
         return False
 
@@ -739,6 +763,9 @@ class AIImagePlugin(BasePlugin):
         # feature-level default is only a last resort when a provider has no
         # default size of its own.
         pieces.append(extract_output_intent_from_prompt(record.prompt))
+        plan_output = record.extra.get("plan_output")
+        if plan_output:
+            pieces.append(self._parse_intent_text(str(plan_output)))
         for key in ("size", "aspect_ratio", "resolution"):
             value = explicit.get(key)
             if value:
@@ -1262,27 +1289,53 @@ class AIImagePlugin(BasePlugin):
 
     @register.tool(
         name="generate_image_batch",
-        description="一次生成多张图片，每张对应一条提示词。任务进入队列，完成后把全部图片一起发送。",
+        description=(
+            "一次生成多张图片。可以直接给 prompts（每张一条提示词），"
+            "也可以只给 brief 一句话，由插件调用模型拆成多条风格不同、画幅不同的提示词。"
+            "任务进入队列，完成后把全部图片一起发送。"
+        ),
         params={
             "type": "object",
             "properties": {
                 "prompts": {
                     "type": "array",
-                    "items": {"type": "string"},
-                    "description": "多条提示词",
+                    "items": {
+                        "anyOf": [
+                            {"type": "string"},
+                            {
+                                "type": "object",
+                                "properties": {
+                                    "prompt": {"type": "string"},
+                                    "output": {"type": "string"},
+                                },
+                                "required": ["prompt"],
+                            },
+                        ]
+                    },
+                    "description": "多条提示词；每项可以是字符串，也可以是 {prompt, output} 对象（output 写画幅，如 3:4）。给了它就不用 brief",
+                },
+                "brief": {
+                    "type": "string",
+                    "description": "一句话需求，插件会拆成多条提示词；prompts 为空时使用",
+                },
+                "count": {
+                    "type": "integer",
+                    "description": "打算生成几张，1 到批量上限；0 用设置里的默认值",
                 },
                 "provider": {"type": "string", "description": "服务商 id"},
                 "size": {"type": "string", "description": "精确尺寸"},
                 "aspect_ratio": {"type": "string", "description": "比例"},
                 "resolution": {"type": "string", "description": "分辨率档位"},
             },
-            "required": ["prompts"],
+            "required": [],
         },
     )
     async def generate_image_batch(
         self,
         event: KiraMessageBatchEvent,
-        prompts: list[str],
+        prompts: list[str] | None = None,
+        brief: str = "",
+        count: int = 0,
         provider: str = "",
         size: str = "",
         aspect_ratio: str = "",
@@ -1294,9 +1347,15 @@ class AIImagePlugin(BasePlugin):
             return self._denied("不在允许使用生图的白名单里", "生图")
         if not self._feature_on("batch_enabled"):
             return self._denied("批量生图功能已在插件设置里关闭", "批量生图")
-        if not prompts or not any(str(p).strip() for p in prompts):
-            return "至少需要一条提示词"
-        prompts = [str(p).strip() for p in prompts if str(p).strip()]
+        prompts = self._batch_prompts(prompts)
+        if not prompts:
+            idea = str(brief or "").strip()
+            if not idea:
+                return "要么给 prompts，要么给 brief"
+            planned, problem = await self._plan_batch(idea, count)
+            if problem:
+                return problem
+            prompts = planned
         limit = int(self._cfg("section_queue", "batch_max_count", default=8) or 8)
         if len(prompts) > limit:
             prompts = prompts[:limit]
@@ -1310,11 +1369,12 @@ class AIImagePlugin(BasePlugin):
             prompts=prompts,
             chain_items=[self._chain_item_dict(item) for item in chain],
         )
+        first_prompt = prompts[0]["prompt"] if isinstance(prompts[0], dict) else prompts[0]
         record = self._store.create(
             kind="generate_image_batch",
             sid=event.sid,
             user_id=self._user_id(event),
-            prompt=prompts[0],
+            prompt=first_prompt,
             provider=chain[0].provider_id,
             chain=[item.provider_id for item in chain],
             size=format_output_intent(self._chain_intent_base(record_hint=extra)),
@@ -1325,6 +1385,58 @@ class AIImagePlugin(BasePlugin):
         except (QueueFullError, UserLimitError) as exc:
             return str(exc)
         return self._ack_text(record, f"已加入批量队列（{len(prompts)} 张）", event)
+
+    @staticmethod
+    def _batch_prompts(items: Any) -> list[Any]:
+        """Normalize batch entries, keeping per-image output specs intact."""
+        cleaned: list[Any] = []
+        for item in items or []:
+            if isinstance(item, dict):
+                text = str(item.get("prompt") or "").strip()
+                if not text:
+                    continue
+                output = str(item.get("output") or item.get("aspect_ratio") or "").strip()
+                cleaned.append({"prompt": text, "output": output} if output else {"prompt": text})
+                continue
+            text = str(item or "").strip()
+            if text:
+                cleaned.append(text)
+        return cleaned
+
+    async def _plan_batch(self, brief: str, count: int) -> tuple[list[dict[str, str]], str]:
+        """Ask the fast model to expand one line into a varied batch plan."""
+        limit = int(self._cfg("section_queue", "batch_max_count", default=8) or 8)
+        wanted = int(count or 0) or int(self._cfg("section_queue", "planner_count", default=4) or 4)
+        wanted = max(1, min(wanted, limit))
+        template = str(self._cfg("section_queue", "planner_prompt", default="") or "").strip()
+        template = template or planner.DEFAULT_PLANNER_TEMPLATE
+        ratios = planner.ratio_choices(self._cfg("section_queue", "planner_ratios", default=""))
+        client = None
+        getter = getattr(self.ctx, "get_default_fast_llm_client", None)
+        if callable(getter):
+            try:
+                client = getter()
+            except Exception as exc:
+                logger.warning("[aiimg] 取不到规划用的模型: %s", exc)
+                client = None
+        if client is None:
+            return [], "没有可用的模型来拆分提示词，请直接给 prompts"
+        request_text = planner.build_request(template, brief=brief, count=wanted, ratios=ratios)
+        try:
+            response = await client.chat(
+                LLMRequest(messages=[{"role": "user", "content": request_text}])
+            )
+        except Exception as exc:
+            logger.warning("[aiimg] 批量规划失败: %s", exc)
+            return [], "拆分提示词失败，请稍后再试，或者直接给 prompts"
+        text = str(getattr(response, "text_response", "") or "")
+        try:
+            items = planner.plan(text, count=wanted, ratios=ratios)
+        except ValueError as exc:
+            logger.warning("[aiimg] 批量规划没有可用结果: %s", exc)
+            return [], str(exc)
+        logger.info("[aiimg] 批量规划 %s", planner.describe(items))
+        return [{"prompt": item.prompt, "output": item.aspect_ratio} for item in items], ""
 
     @register.tool(
         name="generate_video",
@@ -1851,7 +1963,7 @@ class AIImagePlugin(BasePlugin):
         )
 
     async def _run_batch(self, record: TaskRecord) -> dict:
-        prompts = record.extra.get("prompts") or [record.prompt]
+        items = record.extra.get("prompts") or [record.prompt]
         concurrency = int(self._cfg("section_queue", "batch_concurrency", default=2) or 2)
         semaphore = asyncio.Semaphore(max(1, concurrency))
         media: list[str] = []
@@ -1860,9 +1972,20 @@ class AIImagePlugin(BasePlugin):
         size = ""
         errors: list[str] = []
 
-        async def one(index: int, prompt_text: str) -> None:
+        async def one(index: int, item: Any) -> None:
             nonlocal provider, model, size
+            if isinstance(item, dict):
+                prompt_text = str(item.get("prompt") or "").strip()
+                plan_output = str(item.get("output") or "").strip()
+            else:
+                prompt_text = str(item or "").strip()
+                plan_output = ""
+            if not prompt_text:
+                return
             async with semaphore:
+                extra = dict(record.extra)
+                if plan_output:
+                    extra["plan_output"] = plan_output
                 sub = TaskRecord(
                     task_id=f"{record.task_id}-{index}",
                     kind=record.kind,
@@ -1872,7 +1995,7 @@ class AIImagePlugin(BasePlugin):
                     provider=record.provider,
                     chain=record.chain,
                     size=record.size,
-                    extra=dict(record.extra),
+                    extra=extra,
                 )
                 try:
                     result = await self._run_image_chain(sub, kind="generate")
@@ -1883,7 +2006,7 @@ class AIImagePlugin(BasePlugin):
                 except Exception as exc:
                     errors.append(f"{index + 1}: {exc}")
 
-        await asyncio.gather(*(one(i, p) for i, p in enumerate(prompts)))
+        await asyncio.gather(*(one(i, p) for i, p in enumerate(items)))
         if not media:
             raise RuntimeError("批量生成全部失败: " + " | ".join(errors))
         return {

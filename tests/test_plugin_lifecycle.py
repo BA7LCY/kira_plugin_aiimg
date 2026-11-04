@@ -148,6 +148,18 @@ def _install_stubs():
 
     prompt_mod.Prompt = type("Prompt", (), {"__init__": _prompt})
 
+    provider_mod = types.ModuleType("core.provider")
+
+    class _LLMRequest:
+        def __init__(self, messages=None, **kw):
+            self.messages = list(messages or [])
+            self.kwargs = kw
+
+    provider_mod.LLMRequest = _LLMRequest
+    provider_mod.LLMResponse = type(
+        "LLMResponse", (), {"__init__": lambda self, text="": setattr(self, "text_response", text)}
+    )
+
     chat_mod.message_elements = elements_mod
 
     modules = {
@@ -156,6 +168,7 @@ def _install_stubs():
         "core.chat": chat_mod,
         "core.chat.message_elements": elements_mod,
         "core.prompt_manager": prompt_mod,
+        "core.provider": provider_mod,
     }
     return modules
 
@@ -189,12 +202,31 @@ def plugin_module():
 
 
 class _Ctx:
-    def __init__(self, data_dir, persona_mgr=None):
+    def __init__(self, data_dir, persona_mgr=None, fast_llm=None):
         self._data_dir = data_dir
         self.persona_mgr = persona_mgr
+        self.fast_llm = fast_llm
 
     def get_plugin_data_dir(self):
         return self._data_dir
+
+    def get_default_fast_llm_client(self):
+        return self.fast_llm
+
+
+class _FakeLLM:
+    """Stand-in for the framework's fast model client."""
+
+    def __init__(self, reply="", error=None):
+        self.reply = reply
+        self.error = error
+        self.requests = []
+
+    async def chat(self, request):
+        self.requests.append(request)
+        if self.error is not None:
+            raise self.error
+        return types.SimpleNamespace(text_response=self.reply)
 
 
 class _PersonaMgr:
@@ -212,7 +244,7 @@ class _PersonaMgr:
 
 def _config():
     return {
-        "section_access": {"whitelist": []},
+        "section_access": {"whitelist": ""},
         "section_features": {"draw_default_output": "1024x1024"},
         "section_queue": {"max_running": 2, "max_queued": 16},
         "section_gallery": {"max_count": 0, "retention_days": 0},
@@ -265,7 +297,119 @@ def test_access_whitelist_matches_users_and_groups(plugin_module, tmp_path):
     assert plugin._can_use("qq:alice", "qq", "qq:123") is False
     assert plugin._can_use("tg:alice", "tg", "") is True
 
+    # Whole session ids are accepted too: the middle segment is a session type.
+    access["whitelist"] = ["qq:dm:alice"]
+    assert plugin._can_use("qq:alice", "qq", "") is True
+    assert plugin._can_use("tg:alice", "tg", "") is False
+
+    access["whitelist"] = ["qq:group:123"]
+    assert plugin._can_use("qq:bob", "qq", "qq:123") is True
+    assert plugin._can_use("tg:bob", "tg", "tg:123") is False
+
     assert plugin._can_use("", "qq", "qq:123") is False
+
+
+async def test_batch_planner_expands_one_line_into_varied_prompts(plugin_module, tmp_path):
+    reply = json.dumps(
+        {
+            "prompts": [
+                {"prompt": "赛博朋克少女，霓虹街道，正面近景", "aspect_ratio": "3:4"},
+                {"prompt": "赛博朋克少女，雨中背影，广角远景", "aspect_ratio": "16:9"},
+                {"prompt": "赛博朋克少女，天台俯拍，硬光", "aspect_ratio": "3:4"},
+            ]
+        },
+        ensure_ascii=False,
+    )
+    llm = _FakeLLM(reply)
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path, fast_llm=llm), _config())
+
+    items, problem = await plugin._plan_batch("雨夜的赛博朋克少女", 3)
+
+    assert problem == ""
+    assert [item["prompt"] for item in items] == [
+        "赛博朋克少女，霓虹街道，正面近景",
+        "赛博朋克少女，雨中背影，广角远景",
+        "赛博朋克少女，天台俯拍，硬光",
+    ]
+    # The third line repeated 3:4, so the plan spreads it to an unused ratio.
+    assert items[0]["output"] == "3:4"
+    assert items[1]["output"] == "16:9"
+    assert items[2]["output"] not in ("", "3:4", "16:9")
+    assert "雨夜的赛博朋克少女" in llm.requests[0].messages[0]["content"]
+
+
+def test_batch_prompts_keep_per_image_output_specs(plugin_module):
+    cleaned = plugin_module.AIImagePlugin._batch_prompts(
+        [
+            "  第一张  ",
+            {"prompt": "第二张", "output": "3:4"},
+            {"prompt": "第三张", "aspect_ratio": "16:9"},
+            {"prompt": "   ", "output": "1:1"},
+            {"output": "1:1"},
+            "",
+            None,
+        ]
+    )
+
+    assert cleaned == [
+        "第一张",
+        {"prompt": "第二张", "output": "3:4"},
+        {"prompt": "第三张", "output": "16:9"},
+    ]
+
+
+async def test_batch_planner_without_a_model_tells_the_caller_to_send_prompts(plugin_module, tmp_path):
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), _config())
+
+    items, problem = await plugin._plan_batch("一句话", 0)
+
+    assert items == []
+    assert problem == "没有可用的模型来拆分提示词，请直接给 prompts"
+
+
+async def test_batch_planner_reports_model_failures(plugin_module, tmp_path):
+    llm = _FakeLLM(error=RuntimeError("boom"))
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path, fast_llm=llm), _config())
+
+    items, problem = await plugin._plan_batch("一句话", 2)
+
+    assert items == []
+    assert problem == "拆分提示词失败，请稍后再试，或者直接给 prompts"
+
+
+async def test_batch_planner_caps_the_count_to_the_batch_limit(plugin_module, tmp_path):
+    reply = json.dumps(
+        {"prompts": [{"prompt": f"构图 {index}", "aspect_ratio": "1:1"} for index in range(6)]},
+        ensure_ascii=False,
+    )
+    config = _config()
+    config["section_queue"]["batch_max_count"] = 2
+    llm = _FakeLLM(reply)
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path, fast_llm=llm), config)
+
+    items, problem = await plugin._plan_batch("一句话", 9)
+
+    assert problem == ""
+    assert len(items) == 2
+    assert "拆成 2 条" in llm.requests[0].messages[0]["content"]
+
+
+async def test_batch_planner_uses_the_configured_template_and_ratio_pool(plugin_module, tmp_path):
+    reply = json.dumps({"prompts": [{"prompt": "一张", "aspect_ratio": "9:16"}]}, ensure_ascii=False)
+    config = _config()
+    config["section_queue"]["planner_prompt"] = "只回 JSON。张数 {{count}}。画幅 {{ratios}}。"
+    config["section_queue"]["planner_ratios"] = "9:16,21:9"
+    llm = _FakeLLM(reply)
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path, fast_llm=llm), config)
+
+    items, problem = await plugin._plan_batch("夜市", 2)
+
+    assert problem == ""
+    request = llm.requests[0].messages[0]["content"]
+    assert "张数 2" in request
+    assert "9:16、21:9" in request
+    assert "需求：夜市" in request
+    assert items[0]["output"] == "9:16"
 
 
 async def test_initialize_and_terminate(plugin_module, tmp_path):
@@ -1587,3 +1731,75 @@ async def test_upload_appends_subject_entries(plugin_module, tmp_path):
     assert len(second["files"]) == 2
     assert second["files"][0]["name"].startswith("refs/one-")
     assert second["files"][1]["name"].startswith("refs/two-")
+
+
+async def _wait_task(store, task_id, statuses, timeout=15.0):
+    deadline = asyncio.get_running_loop().time() + timeout
+    while asyncio.get_running_loop().time() < deadline:
+        if store.get(task_id).status in statuses:
+            return store.get(task_id)
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"task {task_id} stuck at {store.get(task_id).status!r}")
+
+
+async def test_restart_takes_over_a_task_that_was_running(plugin_module, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    seed = plugin_module.TaskStore(data)
+    record = seed.create(kind="generate_image", user_id="u1", prompt="猫")
+    seed.set_status(record.task_id, "running", provider="p1")
+    seed.close()
+
+    plugin = plugin_module.AIImagePlugin(_Ctx(data), _config())
+    plugin._store = plugin_module.TaskStore(data)
+    seen = []
+
+    async def fake_runner(rec):
+        seen.append((rec.task_id, rec.attempts))
+        return {"media": [], "size": "1024x1024"}
+
+    plugin._run_generate = fake_runner
+    plugin._build_queue()
+    await plugin._queue.start()
+    try:
+        got = await _wait_task(plugin._store, record.task_id, {"succeeded", "failed"})
+        await asyncio.sleep(0.1)
+        got = plugin._store.get(record.task_id)
+    finally:
+        await plugin._queue.stop()
+
+    assert got.status == "succeeded", got.error
+    assert [record.task_id] == [item[0] for item in seen]
+    assert seen[0][1] >= 1
+    assert got.owner == ""
+
+
+async def test_restart_stops_retrying_a_task_out_of_attempts(plugin_module, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    seed = plugin_module.TaskStore(data)
+    record = seed.create(kind="generate_image", user_id="u1", prompt="猫")
+    seed.set_status(record.task_id, "running", provider="p1")
+    for _ in range(3):
+        await seed.bump_attempts(record.task_id)
+    seed.close()
+
+    plugin = plugin_module.AIImagePlugin(_Ctx(data), _config())
+    plugin._store = plugin_module.TaskStore(data)
+    called = []
+
+    async def fake_runner(rec):
+        called.append(rec.task_id)
+        return {"media": []}
+
+    plugin._run_generate = fake_runner
+    plugin._build_queue()
+    await plugin._queue.start()
+    try:
+        got = await _wait_task(plugin._store, record.task_id, {"succeeded", "failed"})
+    finally:
+        await plugin._queue.stop()
+
+    assert got.status == "failed"
+    assert "重试次数已经用尽" in got.error
+    assert called == []

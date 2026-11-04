@@ -377,6 +377,7 @@ function render() {
     settings: renderSettings,
   }[state.view];
   renderer(view);
+  fitTextareas(view);
 }
 
 function releaseBlobs() {
@@ -633,6 +634,7 @@ function fieldLabel(name) {
 }
 
 function providerInput(provider, field) {
+  if (field === "api_keys") return providerKeysField(provider);
   const meta = fieldMeta(provider, field);
   const value = provider[field];
   const wrap = el("div", { class: `field${["textarea", "json", "list"].includes(meta.type) ? " wide" : ""}` });
@@ -699,12 +701,11 @@ function providerInput(provider, field) {
   } else if (meta.type === "textarea") {
     control = el("textarea", {
       "data-provider-field": field,
-      "data-kind": field === "api_keys" ? "keys" : "text",
+      "data-kind": "text",
       placeholder: meta.example || "",
       spellcheck: "false",
     });
-    if (field === "api_keys") control.value = (provider.api_keys || []).join("\n");
-    else control.value = provider[field] || "";
+    control.value = provider[field] || "";
   } else {
     control = el("input", {
       type: "text",
@@ -728,26 +729,6 @@ function providerInput(provider, field) {
         },
         iconNode("refresh"),
         "获取模型"
-      )
-    );
-    wrap.append(row);
-    if (meta.hint) wrap.append(el("div", { class: "hint" }, meta.hint));
-    return wrap;
-  }
-  if (field === "api_keys") {
-    const row = el("div", { class: "model-row keys-row" });
-    row.append(control);
-    row.append(
-      el(
-        "button",
-        {
-          class: "btn small ghost",
-          type: "button",
-          "data-action": "keys-bulk",
-          title: "批量粘贴多把密钥，一行一个",
-        },
-        iconNode("copy"),
-        "批量添加"
       )
     );
     wrap.append(row);
@@ -2191,17 +2172,136 @@ async function moveReference(name, delta) {
   }
 }
 
-function openKeysBulk() {
-  const provider = selectedProvider();
-  if (!provider) return;
+function listValueItems(value) {
+  return toLines(value)
+    .map((line) => String(line || "").trim())
+    .filter(Boolean);
+}
+
+// Trim, drop blanks and collapse duplicates while keeping the typed order.
+function normalizeListItems(items) {
+  const seen = new Set();
+  const out = [];
+  for (const raw of items || []) {
+    const text = String(raw ?? "").trim();
+    if (!text || seen.has(text)) continue;
+    seen.add(text);
+    out.push(text);
+  }
+  return out;
+}
+
+function listSummaryField(options) {
+  const wrap = el("div", { class: "field wide" });
+  wrap.append(
+    el(
+      "div",
+      { class: "field-head" },
+      el("label", {}, options.label || options.title),
+      el("span", { class: "spacer" }),
+      el(
+        "button",
+        {
+          class: "btn small ghost",
+          type: "button",
+          "data-action": "list-edit",
+          "data-list-target": options.target,
+          "data-list-title": options.title,
+        },
+        iconNode(options.items.length ? "edit" : "plus"),
+        options.items.length ? `编辑（${options.items.length}）` : "添加"
+      )
+    )
+  );
+  const row = el("div", { class: "preset-row" });
+  if (!options.items.length) {
+    row.append(el("span", { class: "hint" }, "还没有一项"));
+  } else {
+    options.items.slice(0, 3).forEach((text) => {
+      row.append(el("span", { class: "chip", title: text }, shortText(text, 18)));
+    });
+    if (options.items.length > 3) {
+      row.append(el("span", { class: "chip chip-more" }, `+${options.items.length - 3}`));
+    }
+  }
+  wrap.append(row);
+  if (options.hint) wrap.append(el("div", { class: "hint" }, options.hint));
+  return wrap;
+}
+
+function listField(sectionKey, field, item, value) {
+  const label = item.name || fieldLabel(field);
+  return listSummaryField({
+    label,
+    title: label.endsWith("列表") ? label : `${label}列表`,
+    hint: item.hint || "",
+    items: listValueItems(value),
+    target: `section:${sectionKey}:${field}`,
+  });
+}
+
+function providerKeysField(provider) {
+  const items = (Array.isArray(provider.api_keys) ? provider.api_keys : [])
+    .map((key) => String(key || "").trim())
+    .filter(Boolean);
+  return listSummaryField({
+    label: fieldLabel("api_keys"),
+    title: `${fieldLabel("api_keys")}列表`,
+    hint: "多把密钥轮流使用，被服务商拒绝的那把会暂时停用。",
+    items,
+    target: "provider:api_keys",
+  });
+}
+
+function openListEditorFor(target, title) {
+  const parts = String(target || "").split(":");
+  if (parts[0] === "section") {
+    const [, sectionKey, field] = parts;
+    if (!sectionKey || !field) return;
+    state.config[sectionKey] = state.config[sectionKey] || {};
+    openListEditor({
+      title,
+      items: listValueItems(state.config[sectionKey][field]),
+      onConfirm: (draft) => {
+        state.config[sectionKey][field] = draft.join("\n");
+        render();
+        updateTopbar();
+      },
+    });
+    return;
+  }
+  if (parts[0] === "provider") {
+    const provider = selectedProvider();
+    const field = parts[1];
+    if (!provider || !field) return;
+    openListEditor({
+      title,
+      items: (Array.isArray(provider[field]) ? provider[field] : listValueItems(provider[field])).map((item) =>
+        String(item || "").trim()
+      ),
+      onConfirm: (draft) => {
+        provider[field] = draft;
+        render();
+        updateTopbar();
+      },
+    });
+  }
+}
+
+function openListEditor(options) {
   const modal = $("#modal");
   modal.replaceChildren();
+  const draft = normalizeListItems(options.items);
+  // Keep the list as it was before the editor opened, even when a paste reopens it.
+  const original = normalizeListItems(options.original ?? options.items);
   const card = el("div", { class: "modal-shell narrow" });
+  const countChip = el("span", { class: "chip count" }, `${draft.length} 项`);
   card.append(
     el(
       "div",
       { class: "modal-head" },
-      el("h3", { class: "modal-title" }, "批量添加密钥"),
+      el("h3", { class: "modal-title" }, options.title || "列表"),
+      countChip,
       el("span", { class: "spacer" }),
       el(
         "button",
@@ -2211,22 +2311,105 @@ function openKeysBulk() {
     )
   );
   const body = el("div", { class: "modal-body" });
-  body.append(el("p", { class: "hint" }, "每行一把密钥，空行和重复的会自动跳过，保存后追加到现有密钥后面。"));
-  const area = el("textarea", {
-    rows: "8",
-    class: "keys-bulk-area",
-    placeholder: "sk-xxxx\nyyyy\nzzzz",
+  const addInput = el("input", {
+    type: "text",
+    class: "compose-input",
+    placeholder: "输入一项后按回车添加",
     spellcheck: "false",
   });
-  body.append(area);
+  const addButton = el(
+    "button",
+    { class: "compose-send", type: "button", title: "添加到列表" },
+    iconNode("plus")
+  );
+  addButton.disabled = true;
+  body.append(el("div", { class: "compose" }, addInput, addButton));
+
+  const grid = el("div", { class: "entry-grid" });
+  body.append(grid);
+
+  const paint = (scrollToEnd = false) => {
+    countChip.textContent = `${draft.length} 项`;
+    grid.replaceChildren();
+    if (!draft.length) {
+      grid.append(
+        el(
+          "div",
+          { class: "entry-hollow" },
+          el("span", { class: "entry-hollow-title" }, "还没有任何一项"),
+          el("span", { class: "entry-hollow-tip" }, "敲回车添加，或者用下面的批量粘贴一次贴进来")
+        )
+      );
+      return;
+    }
+    draft.forEach((text, index) => {
+      const row = el("div", { class: "entry" });
+      row.append(el("span", { class: "entry-no" }, String(index + 1).padStart(2, "0")));
+      row.append(el("span", { class: "entry-text", title: text }, text));
+      const remove = el(
+        "button",
+        { class: "entry-drop", type: "button", title: "删除这一项" },
+        iconNode("trash")
+      );
+      remove.addEventListener("click", () => {
+        draft.splice(index, 1);
+        paint();
+      });
+      row.append(remove);
+      grid.append(row);
+    });
+    // A fresh row lands at the bottom; bring it into view.
+    if (scrollToEnd) grid.scrollTop = grid.scrollHeight;
+  };
+
+  const addCurrent = () => {
+    const text = String(addInput.value || "").trim();
+    if (!text) return;
+    if (!draft.includes(text)) draft.push(text);
+    addInput.value = "";
+    addButton.disabled = true;
+    paint(true);
+    addInput.focus();
+  };
+  addInput.addEventListener("input", () => {
+    addButton.disabled = !String(addInput.value || "").trim();
+  });
+  addInput.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    addCurrent();
+  });
+  addButton.addEventListener("click", addCurrent);
+
+  const reopen = (lines) => {
+    const next = normalizeListItems([...draft, ...(lines || [])]);
+    openListEditor({
+      ...options,
+      items: next,
+      original,
+      scrollToEnd: Boolean(lines && lines.length),
+    });
+  };
+  const importButton = el(
+    "button",
+    { class: "btn small ghost", type: "button", "data-action": "list-import" },
+    iconNode("copy"),
+    "批量粘贴"
+  );
+  importButton.addEventListener("click", () =>
+    openListImport({ onImport: reopen, onCancel: () => reopen() })
+  );
+
   body.append(
     el(
       "div",
       { class: "modal-actions" },
+      importButton,
       el("span", { class: "spacer" }),
+      el("button", { class: "btn small ghost", type: "button", "data-action": "modal-close" }, "取消"),
       el(
         "button",
-        { class: "btn small", type: "button", "data-action": "keys-bulk-save" },
+        { class: "btn small", type: "button", "data-action": "list-save" },
         iconNode("check"),
         "保存"
       )
@@ -2235,24 +2418,118 @@ function openKeysBulk() {
   card.append(body);
   modal.append(card);
   modal.classList.remove("hidden");
-  modal.querySelector("[data-action='keys-bulk-save']").addEventListener("click", () => {
-    const existing = (provider.api_keys || []).map((item) => String(item).trim()).filter(Boolean);
-    const seen = new Set(existing);
-    for (const line of String(area.value || "").split(/\r?\n/)) {
-      const key = line.trim();
-      if (!key || seen.has(key)) continue;
-      seen.add(key);
-      existing.push(key);
-    }
-    provider.api_keys = existing;
+  // An untouched list still closes cleanly, it just has nothing to write back.
+  const save = () => {
+    const clean = normalizeListItems(draft);
+    const untouched =
+      clean.length === original.length && clean.every((text, index) => text === original[index]);
     closeModal();
-    render();
-    toast(`密钥 ${existing.length} 把`, "success");
+    if (!untouched) options.onConfirm(clean);
+  };
+  card.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.stopPropagation();
+    closeModal();
   });
+  card.querySelector("[data-action='list-save']").addEventListener("click", save);
+  paint(Boolean(options.scrollToEnd));
+  addInput.focus();
+}
+
+function openListImport(options) {
+  const modal = $("#modal");
+  modal.replaceChildren();
+  const card = el("div", { class: "modal-shell narrow" });
+  const closeButton = el(
+    "button",
+    { class: "icon-btn", type: "button", title: "关闭" },
+    iconNode("close")
+  );
+  closeButton.addEventListener("click", () => options.onCancel());
+  card.append(
+    el(
+      "div",
+      { class: "modal-head" },
+      el("h3", { class: "modal-title" }, "批量粘贴"),
+      el("span", { class: "spacer" }),
+      closeButton
+    )
+  );
+  const body = el("div", { class: "modal-body" });
+  const area = el("textarea", {
+    rows: "10",
+    class: "paste-area",
+    placeholder: "第一项\n第二项\n第三项",
+    spellcheck: "false",
+  });
+  const countLabel = el("span", { class: "paste-count" }, "0 项");
+  body.append(
+    el(
+      "div",
+      { class: "paste-shell" },
+      el(
+        "div",
+        { class: "paste-head" },
+        el("span", { class: "paste-label" }, "每行一项"),
+        countLabel
+      ),
+      area
+    )
+  );
+  body.append(
+    el(
+      "p",
+      { class: "hint paste-tip" },
+      "空行会自动跳过，重复的也不会重复添加。Ctrl / ⌘ + Enter 直接导入。"
+    )
+  );
+  const importButton = el(
+    "button",
+    { class: "btn small", type: "button", "data-action": "list-import-save" },
+    iconNode("check"),
+    "导入"
+  );
+  importButton.disabled = true;
+  const cancelButton = el("button", { class: "btn small ghost", type: "button" }, "取消");
+  cancelButton.addEventListener("click", () => options.onCancel());
+  body.append(
+    el("div", { class: "modal-actions" }, el("span", { class: "spacer" }), cancelButton, importButton)
+  );
+  const readLines = () =>
+    String(area.value || "")
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  const commit = () => {
+    const lines = readLines();
+    if (!lines.length) return;
+    options.onImport(lines);
+  };
+  area.addEventListener("input", () => {
+    const count = readLines().length;
+    countLabel.textContent = `${count} 项`;
+    importButton.disabled = count === 0;
+  });
+  importButton.addEventListener("click", commit);
+  card.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      event.stopPropagation();
+      options.onCancel();
+      return;
+    }
+    if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
+      event.preventDefault();
+      commit();
+    }
+  });
+  card.append(body);
+  modal.append(card);
+  modal.classList.remove("hidden");
   area.focus();
 }
 
-function openPresetEditor(sectionKey, field) {  const modal = $("#modal");
+function openPresetEditor(sectionKey, field) {
+  const modal = $("#modal");
   modal.replaceChildren();
   const list = parsePresets(state.config[sectionKey]?.[field] || []);
   const card = el("div", { class: "modal-shell narrow" });
@@ -2365,6 +2642,24 @@ function openPresetEditor(sectionKey, field) {  const modal = $("#modal");
   });
 }
 
+// Textareas grow with their content instead of trapping it in a fixed box.
+const TEXTAREA_MIN = 74;
+const TEXTAREA_MAX = 320;
+
+function fitTextarea(area) {
+  if (!area || !area.isConnected) return;
+  area.style.height = "auto";
+  const wanted = area.scrollHeight + 2;
+  area.style.height = `${Math.min(Math.max(wanted, TEXTAREA_MIN), TEXTAREA_MAX)}px`;
+  area.style.overflowY = wanted > TEXTAREA_MAX ? "auto" : "hidden";
+}
+
+function fitTextareas(root) {
+  for (const area of (root || document).querySelectorAll("textarea[data-autosize]")) {
+    fitTextarea(area);
+  }
+}
+
 function sectionInput(sectionKey, field, item, value) {
   const kind = item.type || "string";
   if (sectionKey === "section_features" && field === "selfie_reference_files") {
@@ -2373,8 +2668,12 @@ function sectionInput(sectionKey, field, item, value) {
   if (sectionKey === "section_features" && (field === "draw_presets" || field === "edit_presets")) {
     return presetField(sectionKey, field, item, value);
   }
+  if (sectionKey === "section_access" && field === "whitelist") {
+    return listField(sectionKey, field, item, value);
+  }
   const wide = ["textarea", "list", "json", "editor", "markdown"].includes(kind);
-  const wrap = el("div", { class: `field${wide ? " wide" : ""}` });
+  const compact = kind === "integer" || kind === "float";
+  const wrap = el("div", { class: `field${wide ? " wide" : ""}${compact ? " compact" : ""}` });
   wrap.append(el("label", {}, item.name || field));
   let control;
   if (kind === "switch") {
@@ -2404,20 +2703,26 @@ function sectionInput(sectionKey, field, item, value) {
     });
   } else if (kind === "list") {
     control = el("textarea", {
+      class: "grow",
+      "data-autosize": "1",
       "data-section": sectionKey,
       "data-section-field": field,
       "data-kind": "list",
       spellcheck: "false",
     });
     control.value = (Array.isArray(value) ? value : []).join("\n");
+    control.addEventListener("input", () => fitTextarea(control));
   } else if (kind === "textarea" || kind === "json" || kind === "editor" || kind === "markdown") {
     control = el("textarea", {
+      class: "grow",
+      "data-autosize": "1",
       "data-section": sectionKey,
       "data-section-field": field,
       "data-kind": kind === "json" ? "json" : "text",
       spellcheck: "false",
     });
     control.value = kind === "json" ? JSON.stringify(value ?? {}, null, 2) : value ?? "";
+    control.addEventListener("input", () => fitTextarea(control));
   } else {
     control = el("input", {
       type: "text",
@@ -2621,8 +2926,8 @@ function onViewClick(event) {
       fetchModels();
       return;
     }
-    if (action === "keys-bulk") {
-      openKeysBulk();
+    if (action === "list-edit") {
+      openListEditorFor(button.dataset.listTarget || "", button.dataset.listTitle || "");
       return;
     }
     if (action === "gallery-tab") {

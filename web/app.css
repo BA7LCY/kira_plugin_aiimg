@@ -663,6 +663,36 @@ html[data-theme="dark"] .note.warn {
   font-family: var(--mono);
 }
 
+/* Numeric knobs read as one compact row: label left, value right. */
+.field.compact {
+  flex-direction: row;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  padding: 1px 0;
+}
+
+.field.compact > label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.field.compact input[type="number"] {
+  flex: none;
+  width: 88px;
+  text-align: right;
+}
+
+.field.compact .hint {
+  flex: 1 1 100%;
+}
+
+/* Textareas size themselves to their content; see fitTextarea(). */
+.field textarea.grow {
+  resize: none;
+  overflow-y: auto;
+}
+
 .switch {
   display: inline-flex;
   align-items: center;
@@ -1174,26 +1204,191 @@ table.data .mono {
   min-width: 0;
 }
 
-.keys-row {
-  align-items: stretch;
+.chip.count {
+  background: var(--accent-soft);
+  color: var(--accent);
 }
 
-.keys-row textarea {
+/* -- list editor (whitelist, provider keys) --------------------------- */
+
+.compose {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 5px 4px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.compose:focus-within {
+  border-color: var(--accent-line);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.compose-input {
   flex: 1;
   min-width: 0;
-  min-height: 76px;
+  padding: 8px 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font-size: 13px;
 }
 
-.keys-row .btn {
-  align-self: flex-start;
+.compose-send {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex: none;
+  border: 0;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--accent-ink);
+  cursor: pointer;
 }
 
-.keys-bulk-area {
+.compose-send svg {
+  width: 15px;
+  height: 15px;
+}
+
+.compose-send:disabled {
+  background: var(--canvas);
+  color: var(--muted);
+  cursor: default;
+}
+
+.entry-grid {
+  min-height: 150px;
+  max-height: 320px;
+  margin-top: 12px;
+  padding-right: 6px;
+  overflow-y: auto;
+  /* Keep the scrollbar off the row text. */
+  scrollbar-gutter: stable;
+  border-top: 1px solid var(--line);
+}
+
+.entry {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 2px;
+  border-bottom: 1px solid var(--line);
+}
+
+.entry-no {
+  flex: none;
+  width: 22px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.entry-text {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 13px;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.entry-drop {
+  display: inline-flex;
+  flex: none;
+  padding: 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.entry-drop:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.entry-drop svg {
+  width: 15px;
+  height: 15px;
+}
+
+.entry-hollow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 34px 12px;
+  text-align: center;
+}
+
+.entry-hollow-title {
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
+.entry-hollow-tip {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+/* -- bulk paste -------------------------------------------------------- */
+
+.paste-shell {
+  overflow: hidden;
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.paste-shell:focus-within {
+  border-color: var(--accent-line);
+}
+
+.paste-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--surface-2);
+}
+
+.paste-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.paste-count {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--accent);
+}
+
+.paste-area {
+  display: block;
   width: 100%;
-  min-height: 160px;
-  font-family: var(--mono, ui-monospace, monospace);
+  min-height: 190px;
+  padding: 12px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--ink);
+  font-family: var(--mono);
   font-size: 12px;
   resize: vertical;
+}
+
+.paste-tip {
+  margin-top: 8px;
 }
 
 .model-list {
@@ -1401,6 +1596,11 @@ table.data .mono {
   border-top: 1px solid var(--line);
 }
 
+/* Primary actions sit on the far right, the secondary one keeps the left edge. */
+.modal-actions .spacer {
+  margin-left: auto;
+}
+
 @media (max-width: 860px) {
   .modal-main {
     grid-template-columns: 1fr;
@@ -1563,6 +1763,11 @@ table.data .mono {
 
 .field-head label {
   font-weight: 600;
+}
+
+/* Pushes the edit button to the far side of the row, like .card-head does. */
+.field-head .spacer {
+  margin-left: auto;
 }
 
 .file-count {

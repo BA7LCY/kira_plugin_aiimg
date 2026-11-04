@@ -56,6 +56,14 @@ export const iconNodes = {
     ["path", { d: "M5 12h14" }],
     ["path", { d: "M12 5v14" }],
   ],
+  list: [
+    ["path", { d: "M8 6h13" }],
+    ["path", { d: "M8 12h13" }],
+    ["path", { d: "M8 18h13" }],
+    ["path", { d: "M3 6h.01" }],
+    ["path", { d: "M3 12h.01" }],
+    ["path", { d: "M3 18h.01" }],
+  ],
   trash: [
     ["path", { d: "M10 11v6" }],
     ["path", { d: "M14 11v6" }],

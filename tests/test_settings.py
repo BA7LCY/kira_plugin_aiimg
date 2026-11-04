@@ -128,15 +128,12 @@ def test_warnings_report_unknown_chain_provider():
     assert any("还没有配置服务商" in note for note in notes)
 
 
-def test_textarea_fields_accept_list_values():
+def test_textarea_fields_reject_list_values():
     config = S.with_defaults({})
     config["section_access"]["whitelist"] = ["qq:123", "456"]
-    config["section_features"]["draw_presets"] = ["手办化:figurine"]
 
-    out = S.normalize(config)
-
-    assert out["section_access"]["whitelist"] == "qq:123\n456"
-    assert out["section_features"]["draw_presets"] == "手办化:figurine"
+    with pytest.raises(ValueError, match="需要填文字"):
+        S.normalize(config)
 
 
 def test_info_fields_are_not_written_to_config():

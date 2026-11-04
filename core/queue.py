@@ -52,6 +52,8 @@ class TaskQueue:
         max_user_image_tasks: int = 1,
         max_user_video_tasks: int = 1,
         retention_hours: int = 24,
+        owner: str = "",
+        lease_seconds: float = 0.0,
     ):
         self._store = store
         self._max_running = max(1, int(max_running))
@@ -59,26 +61,26 @@ class TaskQueue:
         self._max_user_image = max(1, int(max_user_image_tasks))
         self._max_user_video = max(1, int(max_user_video_tasks))
         self._retention_hours = int(retention_hours)
+        self._owner = str(owner or "")
+        self._lease_seconds = max(0.0, float(lease_seconds or 0.0))
         self._queue: asyncio.Queue[tuple[TaskRecord, Callable[[TaskRecord], Awaitable[dict]]]] = (
             asyncio.Queue()
         )
         self._workers: list[asyncio.Task] = []
         self._retire = 0
         self._on_finished: Callable[[TaskRecord], Awaitable[None]] | None = None
+        self._resume: Callable[[TaskRecord], Awaitable[dict]] | None = None
         self._closed = False
 
     # -- lifecycle ----------------------------------------------------------
 
     async def start(self) -> None:
         """Re-schedule queued/running tasks that survived a restart, then boot."""
+        runner = self._resume or self._missing_runner
         for record in self._store.list_active():
-            if record.status == "running":
-                # A previous run may have been interrupted; reset to queued so
-                # the worker picks it up again.
-                record.status = "queued"
-                record.started_at = 0
-                self._store.upsert(record)
-            self._queue.put_nowait((record, self._missing_runner))
+            # Ownership is decided by the lease: a task another instance is
+            # still running gets dropped when this worker cannot claim it.
+            self._queue.put_nowait((record, runner))
 
         for _ in range(self._max_running):
             self._workers.append(asyncio.create_task(self._worker_loop()))
@@ -93,6 +95,10 @@ class TaskQueue:
 
     def on_finished(self, callback: Callable[[TaskRecord], Awaitable[None]]) -> None:
         self._on_finished = callback
+
+    def on_resume(self, callback: Callable[[TaskRecord], Awaitable[dict]]) -> None:
+        """Runner used for tasks restored from disk after a restart."""
+        self._resume = callback
 
     def apply_limits(
         self,
@@ -229,14 +235,59 @@ class TaskQueue:
         if fresh.status == "cancelled":
             await self._finish(fresh)
             return
+        if self._owner and not await self._claim(record.task_id):
+            logger.info(
+                "跳过任务 %s：另一个实例正在运行它", record.task_id
+            )
+            return
+        fresh = self._store.get(record.task_id) or fresh
+        heartbeat = asyncio.create_task(self._heartbeat(record.task_id)) if self._owner else None
+        try:
+            await self._execute(fresh, runner)
+        finally:
+            if heartbeat is not None:
+                heartbeat.cancel()
+                await asyncio.gather(heartbeat, return_exceptions=True)
+            if self._owner:
+                try:
+                    # Shielded: a shutdown right as the task finishes must not
+                    # leave the row looking like someone still owns it.
+                    await asyncio.shield(
+                        self._store.release(record.task_id, self._owner)
+                    )
+                except Exception:
+                    logger.exception("任务 %s 的租约释放失败", record.task_id)
+
+    async def _claim(self, task_id: str) -> bool:
+        return bool(await self._store.claim(task_id, self._owner, self._lease_seconds))
+
+    async def _heartbeat(self, task_id: str) -> None:
+        interval = max(5.0, self._lease_seconds / 3) if self._lease_seconds else 15.0
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                held = await self._store.heartbeat(task_id, self._owner, self._lease_seconds)
+            except Exception:
+                logger.exception("任务 %s 的心跳失败", task_id)
+                return
+            if not held:
+                logger.warning("任务 %s 的租约被别的实例接管了", task_id)
+                return
+
+    async def _execute(
+        self,
+        fresh: TaskRecord,
+        runner: Callable[[TaskRecord], Awaitable[dict]],
+    ) -> None:
         fresh.status = "running"
         fresh.started_at = int(time.time())
         self._store.upsert(fresh)
+        task_id = fresh.task_id
         started = time.monotonic()
         logger.info(
             "start %s task %s provider=%s size=%s waiting=%d",
             fresh.kind,
-            fresh.task_id,
+            task_id,
             fresh.provider or "-",
             fresh.size or "-",
             self._queue.qsize(),
@@ -244,41 +295,41 @@ class TaskQueue:
         try:
             result = await runner(fresh)
         except QueueCancelled:
-            self._store.cancel(record.task_id)
-            fresh = self._store.get(record.task_id) or fresh
+            self._store.cancel(task_id)
+            fresh = self._store.get(task_id) or fresh
             await self._finish(fresh)
             return
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            self._store.set_error(record.task_id, str(exc), provider=fresh.provider)
+            self._store.set_error(task_id, str(exc), provider=fresh.provider)
             logger.warning(
                 "task %s failed after %dms: %s",
-                record.task_id,
+                task_id,
                 int((time.monotonic() - started) * 1000),
                 exc,
             )
-            fresh = self._store.get(record.task_id) or record
+            fresh = self._store.get(task_id) or fresh
             await self._finish(fresh)
             return
 
         # A cancel may have raced with completion; respect it.
-        fresh = self._store.get(record.task_id) or record
+        fresh = self._store.get(task_id) or fresh
         if fresh.status == "cancelled":
             await self._finish(fresh)
             return
         self._store.set_result(
-            record.task_id,
+            task_id,
             json.dumps(result, ensure_ascii=False),
             provider=fresh.provider,
         )
         logger.info(
             "done task %s in %dms provider=%s",
-            record.task_id,
+            task_id,
             int((time.monotonic() - started) * 1000),
             fresh.provider or "-",
         )
-        fresh = self._store.get(record.task_id) or record
+        fresh = self._store.get(task_id) or fresh
         await self._finish(fresh)
 
     async def _finish(self, record: TaskRecord) -> None:

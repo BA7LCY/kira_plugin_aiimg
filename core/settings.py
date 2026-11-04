@@ -708,9 +708,6 @@ def _section_type_check(field: str, label: str, kind: str, value: Any, item: dic
             raise ValueError(f"{label} 需要填数字")
         return float(value)
     if kind in ("string", "text", "textarea", "sensitive"):
-        if isinstance(value, (list, tuple)):
-            # Older configs stored these as arrays; the form now edits lines.
-            value = "\n".join(str(entry) for entry in value)
         if not isinstance(value, str):
             raise ValueError(f"{label} 需要填文字")
         if len(value) > 20000:

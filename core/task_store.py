@@ -7,7 +7,10 @@ inspected, which is the point of the no-hidden-prompts policy.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import secrets
 import sqlite3
 import time
 import uuid
@@ -18,6 +21,50 @@ from typing import Any
 
 def _now() -> int:
     return int(time.time())
+
+
+# -- task state machine -----------------------------------------------------
+
+# queued -> running -> succeeded | failed | cancelled, plus queued -> cancelled.
+# Finished records are final: nothing may move them back to an active state.
+_STATUS_LABELS: dict[str, str] = {
+    "queued": "排队中",
+    "running": "运行中",
+    "succeeded": "已成功",
+    "failed": "已失败",
+    "cancelled": "已取消",
+}
+_TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
+_TRANSITIONS: dict[str, frozenset[str]] = {
+    "queued": frozenset({"running", "succeeded", "failed", "cancelled"}),
+    "running": frozenset({"succeeded", "failed", "cancelled"}),
+    "succeeded": frozenset(),
+    "failed": frozenset(),
+    "cancelled": frozenset(),
+}
+
+
+def _validate_transition(current: str, target: str) -> None:
+    """Raise ValueError when a status change is not allowed."""
+    if target not in _STATUS_LABELS:
+        raise ValueError(f"未知任务状态：{target}")
+    if target == current:
+        return
+    allowed = _TRANSITIONS.get(current)
+    if allowed is None:
+        # Legacy/unknown stored value: do not trap old rows forever.
+        return
+    if target in allowed:
+        return
+    label = _STATUS_LABELS[target]
+    if current in _TERMINAL_STATES:
+        raise ValueError(f"任务已结束，不能再改成{label}")
+    raise ValueError(f"任务{_STATUS_LABELS.get(current, current)}，不能改成{label}")
+
+
+def new_owner_id() -> str:
+    """Return an instance id: ``aiimg-<pid>-<8 hex chars>``."""
+    return f"aiimg-{os.getpid()}-{secrets.token_hex(4)}"
 
 
 def _clean_text(value: Any) -> str:
@@ -47,6 +94,9 @@ class TaskRecord:
     final_prompt: str = ""
     size: str = ""
     extra: dict = field(default_factory=dict)
+    owner: str = ""  # instance id currently executing the task
+    lease_until: float = 0.0  # lease deadline, epoch seconds
+    attempts: int = 0  # how often the task has been claimed
 
     def to_dict(self) -> dict:
         return {
@@ -68,10 +118,14 @@ class TaskRecord:
             "final_prompt": self.final_prompt,
             "size": self.size,
             "extra": self.extra,
+            "owner": self.owner,
+            "lease_until": self.lease_until,
+            "attempts": self.attempts,
         }
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "TaskRecord":
+        keys = row.keys()
         return cls(
             task_id=row["task_id"],
             kind=row["kind"],
@@ -91,6 +145,9 @@ class TaskRecord:
             final_prompt=row["final_prompt"],
             size=row["size"],
             extra=json.loads(row["extra"] or "{}"),
+            owner=row["owner"] if "owner" in keys else "",
+            lease_until=float(row["lease_until"]) if "lease_until" in keys else 0.0,
+            attempts=int(row["attempts"]) if "attempts" in keys else 0,
         )
 
 
@@ -110,10 +167,50 @@ _STATE_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 class TaskStore:
+    #: Lease columns added after 0.3.4; old files get them via ALTER TABLE.
+    _LEASE_COLUMNS: tuple[tuple[str, str], ...] = (
+        ("owner", "TEXT NOT NULL DEFAULT ''"),
+        ("lease_until", "REAL NOT NULL DEFAULT 0"),
+        ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+    )
+
     def __init__(self, data_dir: Path):
         self._path = Path(data_dir) / "tasks.sqlite3"
-        self._db = sqlite3.connect(str(self._path))
+        self._db = sqlite3.connect(str(self._path), timeout=5.0)
         self._db.row_factory = sqlite3.Row
+        # Autocommit: every statement commits on its own, so a second process
+        # opening the same file never waits on a transaction we forgot to close.
+        # Explicit commit() calls stay valid (they become no-ops).
+        self._db.isolation_level = None
+        self._lock: asyncio.Lock | None = None
+        self._configure()
+        self._create_schema()
+        self._migrate()
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_kind ON tasks(kind)"
+        )
+        self._db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_tasks_lease ON tasks(status, lease_until)"
+        )
+        self._db.commit()
+
+    # -- setup --------------------------------------------------------------
+
+    def _configure(self) -> None:
+        """Make the file safe to share between several plugin instances."""
+        # WAL: readers never block the writer and vice versa. Some exotic
+        # filesystems refuse it; the store still works, just with more locking.
+        try:
+            self._db.execute("PRAGMA journal_mode=WAL").fetchone()
+        except sqlite3.Error:
+            pass
+        self._db.execute("PRAGMA busy_timeout=5000")
+        self._db.execute("PRAGMA synchronous=NORMAL")
+
+    def _create_schema(self) -> None:
         self._db.executescript(
             """
             CREATE TABLE IF NOT EXISTS tasks (
@@ -134,17 +231,30 @@ class TaskStore:
                 prompt_layers TEXT NOT NULL DEFAULT '[]',
                 final_prompt TEXT NOT NULL DEFAULT '',
                 size TEXT NOT NULL DEFAULT '',
-                extra TEXT NOT NULL DEFAULT '{}'
+                extra TEXT NOT NULL DEFAULT '{}',
+                owner TEXT NOT NULL DEFAULT '',
+                lease_until REAL NOT NULL DEFAULT 0,
+                attempts INTEGER NOT NULL DEFAULT 0
             )
             """
         )
-        self._db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"
-        )
-        self._db.execute(
-            "CREATE INDEX IF NOT EXISTS idx_tasks_kind ON tasks(kind)"
-        )
+
+    def _migrate(self) -> None:
+        """Add lease columns to a database created by an older version."""
+        existing = {
+            str(row["name"])
+            for row in self._db.execute("PRAGMA table_info(tasks)").fetchall()
+        }
+        for name, decl in self._LEASE_COLUMNS:
+            if name not in existing:
+                self._db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
         self._db.commit()
+
+    def _alock(self) -> asyncio.Lock:
+        """Lazily create the asyncio lock (bound to the running loop)."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     def close(self) -> None:
         try:
@@ -187,8 +297,9 @@ class TaskStore:
             INSERT INTO tasks (
                 task_id, kind, sid, session_type, user_id, prompt, provider,
                 status, result, error, created_at, started_at, finished_at,
-                chain, prompt_layers, final_prompt, size, extra
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                chain, prompt_layers, final_prompt, size, extra,
+                owner, lease_until, attempts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 kind=excluded.kind, sid=excluded.sid,
                 session_type=excluded.session_type, user_id=excluded.user_id,
@@ -198,7 +309,8 @@ class TaskStore:
                 finished_at=excluded.finished_at, chain=excluded.chain,
                 prompt_layers=excluded.prompt_layers,
                 final_prompt=excluded.final_prompt, size=excluded.size,
-                extra=excluded.extra
+                extra=excluded.extra, owner=excluded.owner,
+                lease_until=excluded.lease_until, attempts=excluded.attempts
             """,
             (
                 record.task_id,
@@ -219,6 +331,9 @@ class TaskStore:
                 _clean_text(record.final_prompt),
                 record.size,
                 _json_dumps(record.extra),
+                _clean_text(record.owner),
+                float(record.lease_until or 0.0),
+                int(record.attempts or 0),
             ),
         )
         self._db.commit()
@@ -301,9 +416,15 @@ class TaskStore:
         started_at: int = 0,
         finished_at: int = 0,
     ) -> None:
+        """Persist a status change, refusing illegal transitions.
+
+        Raises ValueError when the record is already finished, e.g.
+        ``任务已结束，不能再改成运行中``.
+        """
         record = self.get(task_id)
         if record is None:
             return
+        _validate_transition(record.status, status)
         record.status = status
         if provider:
             record.provider = provider
@@ -363,6 +484,97 @@ class TaskStore:
         record.finished_at = _now()
         self.upsert(record)
         return True
+
+    # -- owner leases -------------------------------------------------------
+    #
+    # A lease says "instance X is executing this task until epoch T". It lets
+    # several plugin instances share one database: only the lease holder may
+    # run a task, and a task whose lease expired is up for grabs again.
+    # All timestamps go through time.time() so they survive a process restart.
+
+    async def claim(self, task_id: str, owner: str, ttl_seconds: float) -> bool:
+        """Atomically take ownership of a queued or abandoned task.
+
+        Succeeds only when the task is queued, or running with an expired
+        lease / no owner. On success the owner and lease are written, the
+        attempt counter is bumped and the status becomes running.
+        """
+        if not owner:
+            raise ValueError("owner 不能为空")
+        async with self._alock():
+            now = time.time()
+            deadline = now + max(0.0, float(ttl_seconds))
+            cursor = self._db.execute(
+                """
+                UPDATE tasks SET
+                    owner = ?,
+                    lease_until = ?,
+                    attempts = attempts + 1,
+                    status = CASE WHEN status = 'queued' THEN 'running'
+                                  ELSE status END,
+                    started_at = CASE WHEN started_at = 0 THEN ? ELSE started_at END
+                WHERE task_id = ?
+                  AND (status = 'queued'
+                       OR (status = 'running'
+                           AND (owner = '' OR lease_until <= ?)))
+                """,
+                (owner, deadline, int(now), task_id, now),
+            )
+            self._db.commit()
+            return cursor.rowcount > 0
+
+    async def heartbeat(
+        self, task_id: str, owner: str, ttl_seconds: float
+    ) -> bool:
+        """Renew the lease of the current holder; False if not the holder."""
+        if not owner:
+            return False
+        async with self._alock():
+            deadline = time.time() + max(0.0, float(ttl_seconds))
+            cursor = self._db.execute(
+                "UPDATE tasks SET lease_until = ? "
+                "WHERE task_id = ? AND owner = ? AND status IN ('queued', 'running')",
+                (deadline, task_id, owner),
+            )
+            self._db.commit()
+            return cursor.rowcount > 0
+
+    async def release(self, task_id: str, owner: str) -> None:
+        """Drop the lease; a non-holder is a silent no-op."""
+        if not owner:
+            return
+        async with self._alock():
+            self._db.execute(
+                "UPDATE tasks SET owner = '', lease_until = 0 "
+                "WHERE task_id = ? AND owner = ?",
+                (task_id, owner),
+            )
+            self._db.commit()
+
+    async def stale_running(self, now: float | None = None) -> list[TaskRecord]:
+        """Running tasks whose lease expired, oldest first."""
+        moment = time.time() if now is None else float(now)
+        async with self._alock():
+            rows = self._db.execute(
+                "SELECT * FROM tasks WHERE status = 'running' AND lease_until <= ? "
+                "ORDER BY created_at ASC, rowid ASC",
+                (moment,),
+            ).fetchall()
+        return [TaskRecord.from_row(row) for row in rows]
+
+    async def bump_attempts(self, task_id: str) -> int:
+        """Increment attempts and return the new value (0 for unknown tasks)."""
+        async with self._alock():
+            cursor = self._db.execute(
+                "UPDATE tasks SET attempts = attempts + 1 WHERE task_id = ?",
+                (task_id,),
+            )
+            if cursor.rowcount <= 0:
+                return 0
+            row = self._db.execute(
+                "SELECT attempts FROM tasks WHERE task_id = ?", (task_id,)
+            ).fetchone()
+            return int(row["attempts"]) if row else 0
 
     def count_active_by_user(
         self, user_id: str, kind: str = "", exclude_task_id: str = ""
