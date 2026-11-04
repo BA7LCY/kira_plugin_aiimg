@@ -584,6 +584,19 @@ async def test_api_config_returns_editable_payload(plugin_module, tmp_path):
     assert payload["status"]["ready"] is False
 
 
+async def test_api_config_lite_skips_the_live_numbers(plugin_module, tmp_path):
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), _compat_config())
+    plugin._registry = _Registry()
+
+    payload = await plugin.api_config(lite=True)
+
+    assert payload["status"] == {}
+    assert payload["notes"] == []
+    assert payload["config"]["section_compat"]["replace_builtin_media"] is True
+    assert len(payload["revision"]) == 64
+    assert payload["sections"]["section_queue"]["fields"]["max_running"]["type"] == "integer"
+
+
 def test_chain_output_beats_provider_default(plugin_module, tmp_path):
     from types import SimpleNamespace
 

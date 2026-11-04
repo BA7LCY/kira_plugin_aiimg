@@ -86,6 +86,7 @@ const state = {
   metrics: [],
   saving: false,
   polling: 0,
+  loadError: "",
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -153,8 +154,10 @@ function toast(message, tone = "info") {
 
 // -- data -------------------------------------------------------------
 
-async function load() {
-  const data = await api("/config");
+// One response carries everything the form needs; only `status` and `notes`
+// touch the gallery, the queue and the provider ledger, so they can arrive
+// later without holding the first paint hostage.
+function applyConfig(data) {
   state.config = data.config || {};
   state.original = structuredClone(state.config);
   state.revision = data.revision || "";
@@ -167,14 +170,32 @@ async function load() {
   state.status = data.status || {};
   state.notes = data.notes || [];
   state.providerError = "";
+  state.loadError = "";
   const providers = state.config.providers || [];
   if (!providers.length) state.selected = null;
   else if (!providers.some((item) => item.id === state.selected)) {
     state.selected = providers[0].id;
   }
-  await loadReferenceFiles();
-  await loadMetrics();
+}
+
+async function load() {
+  // Paint the form from the light payload, then fill in the live numbers and
+  // the reference library side by side. A broken status block therefore costs
+  // a number, not the whole page.
+  applyConfig(await api("/config?lite=1"));
   render();
+  await Promise.all([loadReferenceFiles(), loadMetrics(), loadStatus()]);
+  render();
+}
+
+async function loadStatus() {
+  try {
+    const data = await api("/config");
+    state.status = data.status || {};
+    state.notes = data.notes || [];
+  } catch (error) {
+    state.status = state.status || {};
+  }
 }
 
 // Health numbers come from the plugin's own ledger, so a failed request only
@@ -363,7 +384,11 @@ function render() {
           { class: "blank" },
           iconNode("alert"),
           el("strong", {}, "配置没有加载出来"),
-          el("p", {}, "点右上角刷新重试")
+          el(
+            "p",
+            {},
+            state.loadError || "点右上角刷新重试"
+          )
         )
       )
     );
@@ -3432,8 +3457,9 @@ async function start() {
       await load();
     } catch (retryError) {
       state.config = null;
+      state.loadError = String(retryError.message || retryError);
       render();
-      toast(String(retryError.message || retryError), "error");
+      toast(state.loadError, "error");
     }
   }
 }

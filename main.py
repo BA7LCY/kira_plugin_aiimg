@@ -220,6 +220,7 @@ class AIImagePlugin(BasePlugin):
     # ------------------------------------------------------------------
 
     async def initialize(self):
+        started = time.perf_counter()
         self._data_dir = self.ctx.get_plugin_data_dir()
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._debounce.configure(
@@ -243,7 +244,6 @@ class AIImagePlugin(BasePlugin):
         if restored:
             logger.info("[aiimg] 发现 %d 个没跑完的任务，接着处理", len(restored))
         await self._queue.start()
-        self._prune_old_tasks()
         self._ready = True
         for error in self._registry.validate():
             logger.warning("[aiimg] provider config: %s", error)
@@ -288,9 +288,26 @@ class AIImagePlugin(BasePlugin):
         logger.info("[aiimg] initialized with %d image / %d video providers",
                     len(self._registry.image_provider_ids()),
                     len(self._registry.video_provider_ids()))
+        logger.info(
+            "[aiimg] 初始化完成，用时 %.0f 毫秒", (time.perf_counter() - started) * 1000
+        )
+        # Old task rows never affect the first request, so sweeping them runs
+        # once the plugin has already reported ready.
+        self._housekeeping = asyncio.create_task(self._deferred_housekeeping())
+
+    async def _deferred_housekeeping(self) -> None:
+        await asyncio.sleep(0)
+        started = time.perf_counter()
+        await asyncio.to_thread(self._prune_old_tasks)
+        logger.info(
+            "[aiimg] 后台清理用时 %.0f 毫秒", (time.perf_counter() - started) * 1000
+        )
 
     async def terminate(self):
         self._ready = False
+        housekeeping = getattr(self, "_housekeeping", None)
+        if housekeeping is not None and not housekeeping.done():
+            housekeeping.cancel()
         if self._queue is not None:
             await self._queue.stop()
         if self._gallery is not None:
@@ -2666,7 +2683,7 @@ class AIImagePlugin(BasePlugin):
         }
 
     @register.api(method="GET", path="/aiimg/config", auth=True, summary="读取全部配置")
-    async def api_config(self):
+    async def api_config(self, lite: bool = False):
         manager = getattr(self.ctx, "plugin_mgr", None)
         try:
             cfg = (
@@ -2676,29 +2693,48 @@ class AIImagePlugin(BasePlugin):
             )
         except Exception:
             cfg = self.plugin_cfg or {}
-        return {
+        try:
+            merged = settings_mod.with_defaults(cfg)
+        except Exception:
+            # A malformed stored value must not blank the whole settings page.
+            logger.exception("[aiimg] 配置读进来后补默认值失败，先用原始内容")
+            merged = dict(cfg or {})
+        templates = settings_mod.template_catalog()
+        payload = {
             "revision": settings_mod.revision(cfg),
-            "config": settings_mod.with_defaults(cfg),
+            "config": merged,
             "sections": settings_mod.sections(),
-            "templates": settings_mod.template_catalog(),
+            "templates": templates,
             "fields": settings_mod.field_meta(),
             "provider_defaults": {
                 template["key"]: settings_mod.provider_defaults(template["key"])
-                for template in settings_mod.template_catalog()
+                for template in templates
             },
             "required": {
                 template["key"]: list(
                     settings_mod.REQUIRED_FIELDS.get(template["key"], ())
                 )
-                for template in settings_mod.template_catalog()
+                for template in templates
             },
             "features": [
                 {"key": key, **settings_mod.FEATURE_LABELS.get(key, {})}
                 for key in settings_mod.IMPORT_FEATURES
             ],
-            "notes": settings_mod.warnings(cfg),
-            "status": self._status_payload(),
+            "notes": [],
+            "status": {},
         }
+        if lite:
+            # The page paints from this and asks again for the live numbers.
+            return payload
+        try:
+            payload["notes"] = settings_mod.warnings(cfg)
+        except Exception:
+            logger.exception("[aiimg] 配置提示生成失败")
+        try:
+            payload["status"] = self._status_payload()
+        except Exception:
+            logger.exception("[aiimg] 状态汇总失败")
+        return payload
 
     @staticmethod
     def _merge_config(current: dict, incoming: dict) -> dict:
