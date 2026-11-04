@@ -2199,7 +2199,6 @@ function listSummaryField(options) {
       "div",
       { class: "field-head" },
       el("label", {}, options.label || options.title),
-      el("span", { class: "spacer" }),
       el(
         "button",
         {
