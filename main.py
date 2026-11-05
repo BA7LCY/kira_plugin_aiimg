@@ -2228,7 +2228,7 @@ class AIImagePlugin(BasePlugin):
                     continue
                 return (
                     "用户引用了历史消息，但平台没有提供其中的图片内容；"
-                    "需要改图时请让对方重新发送那张图片。"
+                    "需要改图时请把那张图片重新发一次。"
                 )
         return ""
 

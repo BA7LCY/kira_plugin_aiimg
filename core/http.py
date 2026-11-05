@@ -73,7 +73,7 @@ def retry_after_seconds(value: str | None) -> float | None:
 
 
 def _connector_kwargs() -> dict[str, Any]:
-    """连接器参数；3.14 起 enable_cleanup_closed 已被上游修复取代，传了只会告警。"""
+    """连接器参数；Python 3.14 起已自行处理这类连接清理，传了只会告警。"""
     kwargs: dict[str, Any] = {
         "limit": _CONNECTION_LIMIT,
         "limit_per_host": _CONNECTION_LIMIT_PER_HOST,

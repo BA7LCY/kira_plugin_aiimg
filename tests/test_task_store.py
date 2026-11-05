@@ -28,12 +28,12 @@ def test_lifecycle_steps_are_logged_without_prompt_text(tmp_path, caplog):
     secret = "这是一段很长的提示词，日志里不该出现"
     with caplog.at_level(logging.INFO):
         record = store.create(kind="generate_image", user_id="u1", prompt=secret)
-        store.set_error(record.task_id, "上游返回 500")
+        store.set_error(record.task_id, "服务商返回 500")
     text = "\n".join(item.getMessage() for item in caplog.records)
     assert "新建任务" in text
     assert record.task_id in text
     assert "已失败" in text
-    assert "上游返回 500" in text
+    assert "服务商返回 500" in text
     assert secret not in text
     store.close()
 

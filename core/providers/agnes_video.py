@@ -283,7 +283,7 @@ class AgnesVideoService(VideoBackend):
             or "未提供错误详情"
         )
         if isinstance(detail, dict):
-            detail = detail.get("message") or detail.get("code") or "上游任务失败"
+            detail = detail.get("message") or detail.get("code") or "服务商未返回原因"
         return self._redact(str(detail))[:300]
 
     async def _request(

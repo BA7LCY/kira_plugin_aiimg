@@ -180,7 +180,7 @@ def test_media_hint_warns_when_the_quote_has_no_media(plugin_module, tmp_path):
     hint = plugin._media_hint(event)
 
     assert "没有提供其中的图片内容" in hint
-    assert "重新发送" in hint
+    assert "重新发" in hint
 
 
 def test_media_hint_stays_quiet_without_media_or_quotes(plugin_module, tmp_path):

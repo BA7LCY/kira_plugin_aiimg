@@ -154,7 +154,7 @@ class OpenAIFullURLBackend(KeyPoolMixin, ImageBackend):
     # -- session ------------------------------------------------------------
 
     def _request_timeout(self) -> aiohttp.ClientTimeout:
-        """单次请求超时：沿用原来的总超时，不依赖共享会话的默认值。"""
+        """单次请求超时：沿用插件配置的总超时，不依赖共享会话的默认值。"""
         return aiohttp.ClientTimeout(total=max(1, int(self.timeout)))
 
     async def _session_get(self) -> aiohttp.ClientSession:
@@ -387,7 +387,7 @@ class OpenAIFullURLBackend(KeyPoolMixin, ImageBackend):
         for shape in json_shapes:
             # 图片字段先写进请求体、文字字段跟在后面：先图后文的顺序同时适用
             # 于 JSON 请求体，服务端会按字段出现顺序解析输入。
-            # 这里用 setdefault 合并，保持原先「图片字段优先」的取值规则。
+            # 这里用 setdefault 合并，图片字段优先于同一名字的文字字段。
             trial = dict(shape)
             for key, value in payload.items():
                 trial.setdefault(key, value)

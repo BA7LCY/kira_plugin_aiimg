@@ -67,19 +67,19 @@ def test_new_owner_id_shape():
 async def test_migration_from_old_schema(tmp_path):
     """An old database file keeps working and gains the lease columns."""
     db_path = tmp_path / "tasks.sqlite3"
-    legacy = sqlite3.connect(str(db_path))
-    legacy.executescript(OLD_SCHEMA)
-    legacy.execute(
+    old_db = sqlite3.connect(str(db_path))
+    old_db.executescript(OLD_SCHEMA)
+    old_db.execute(
         "INSERT INTO tasks (task_id, kind, status, created_at, prompt) "
         "VALUES (?, ?, ?, ?, ?)",
-        ("legacy-1", "generate_image", "queued", int(time.time()), "旧任务"),
+        ("old-1", "generate_image", "queued", int(time.time()), "旧任务"),
     )
-    legacy.commit()
-    legacy.close()
+    old_db.commit()
+    old_db.close()
 
     store = TaskStore(tmp_path)
     try:
-        record = store.get("legacy-1")
+        record = store.get("old-1")
         assert record is not None
         assert record.prompt == "旧任务"
         assert record.status == "queued"
@@ -93,8 +93,8 @@ async def test_migration_from_old_schema(tmp_path):
         }
         assert {"owner", "lease_until", "attempts"} <= columns
 
-        assert await store.claim("legacy-1", OWNER_A, 60.0) is True
-        claimed = store.get("legacy-1")
+        assert await store.claim("old-1", OWNER_A, 60.0) is True
+        claimed = store.get("old-1")
         assert claimed.status == "running"
         assert claimed.owner == OWNER_A
         assert claimed.attempts == 1

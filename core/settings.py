@@ -283,7 +283,7 @@ FIELD_META: dict[str, dict[str, Any]] = {
         "label": "异步任务",
         "type": "select",
         "options": ["auto", "on", "off"],
-        "hint": "auto 先按普通方式提交，对方返回任务号时自动改成轮询取图；on 直接以异步方式提交；off 只等同步结果。",
+        "hint": "auto 先按普通方式提交，服务商返回任务号时自动改成轮询取图；on 直接以异步方式提交；off 只等同步结果。",
     },
     "poll_interval": {
         "label": "查询间隔秒数",
@@ -428,7 +428,7 @@ CONSOLE_ONLY_FEATURES: dict[str, dict[str, Any]] = {
         "type": "switch",
         "name": "自拍沿用改图链路",
         "default": True,
-        "note": "自拍没单独配链路时，自动借用改图那条链路兜底。关掉就必须给自拍单独配链路。",
+        "note": "自拍没单独配链路时，自动走改图那条链路兜底。关掉就必须给自拍单独配链路。",
     },
     "selfie_reference_files": {
         "type": "textarea",
@@ -622,7 +622,7 @@ def mask_key(value: str) -> str:
 
 
 def mask_providers(config: dict | None) -> dict[str, Any]:
-    """Copy of the config whose provider keys are masked for the settings page."""
+    """Return a copy whose provider keys are masked for the settings page."""
     result = copy.deepcopy(config or {})
     providers = result.get("providers")
     if not isinstance(providers, list):

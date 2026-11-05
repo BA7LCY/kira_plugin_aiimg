@@ -56,7 +56,7 @@ def _validate_transition(current: str, target: str) -> None:
         return
     allowed = _TRANSITIONS.get(current)
     if allowed is None:
-        # Legacy/unknown stored value: do not trap old rows forever.
+        # Old or unknown stored value: do not trap rows forever.
         return
     if target in allowed:
         return
@@ -570,7 +570,7 @@ class TaskStore:
                 int(ttl_seconds),
             )
         else:
-            logger.debug("任务 %s 没抢到租约：已被别人持有或已结束", task_id)
+            logger.debug("任务 %s 没抢到租约：已被其他实例持有或已结束", task_id)
         return won
 
     async def heartbeat(

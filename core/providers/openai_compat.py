@@ -224,7 +224,7 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
     # -- session ------------------------------------------------------------
 
     def _request_timeout(self) -> aiohttp.ClientTimeout:
-        """单次请求超时：沿用原来的总超时，不依赖共享会话的默认值。"""
+        """单次请求超时：沿用插件配置的总超时，不依赖共享会话的默认值。"""
         return aiohttp.ClientTimeout(total=max(1, int(self.timeout)))
 
     async def _session_get(self) -> aiohttp.ClientSession:

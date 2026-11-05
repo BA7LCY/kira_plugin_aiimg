@@ -140,9 +140,9 @@ async def test_invalid_retry_after_falls_back_to_exponential_delay(request_case)
 @pytest.mark.parametrize("retries", [0, 2])
 async def test_exhausted_budget_does_not_add_a_sleep(request_case, retries):
     case = request_case
-    case.session.responses = [Response(503, b"upstream busy") for _ in range(retries + 1)]
+    case.session.responses = [Response(503, b"provider busy") for _ in range(retries + 1)]
 
-    with pytest.raises(RuntimeError, match="HTTP 503: upstream busy"):
+    with pytest.raises(RuntimeError, match="HTTP 503: provider busy"):
         await case.invoke(retries=retries)
 
     assert case.attempts == list(range(retries))

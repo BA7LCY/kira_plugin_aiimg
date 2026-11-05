@@ -221,7 +221,7 @@ def test_provider_requests_keep_their_own_timeout(monkeypatch):
 
 
 def test_video_download_uses_shared_session_with_per_request_timeout(monkeypatch, tmp_path):
-    """视频分段下载不再自建会话，且每次 GET 都带原来的总超时与读超时。"""
+    """视频分段下载不再自建会话，且每次 GET 都带插件配置的总超时与读超时。"""
     payload = _video_bytes()
     session = _FakeSession(
         _FakeStreamResponse(
