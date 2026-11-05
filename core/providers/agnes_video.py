@@ -14,6 +14,7 @@ import json
 import re
 import sqlite3
 import time
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import quote, urlsplit
 
@@ -158,6 +159,8 @@ class AgnesVideoService(VideoBackend):
         mode: str = "",
         images: list[Path] | None = None,
         audios: list[Path] | None = None,
+        last_frame: Path | None = None,
+        audio: Path | None = None,
         extra: dict | None = None,
     ) -> dict:
         merged_extra = {**self.extra_body, **(extra or {})}
@@ -178,16 +181,44 @@ class AgnesVideoService(VideoBackend):
 
         image_urls = [self._image_data_url(path) for path in images or []]
         audio_urls = [self._audio_data_url(path) for path in audios or []]
+        # 字段名沿用仓库既有约定：settings 的 extra_body 提示与 validate_payload
+        # 都用 first_frame / last_frame / images / audios，因此尾帧写 last_frame、
+        # 音轨并入 audios 列表，不再叠加 audio / audio_url / music 别名。服务商若
+        # 另有独立音轨字段（如 music），走 extra_body 透传，字段名以文档为准，未确认。
+        last_frame_url = (
+            self._optional_data_url(last_frame, "尾帧", self._image_data_url)
+            if last_frame is not None
+            else ""
+        )
+        if audio is not None:
+            audio_urls.insert(
+                0, self._optional_data_url(audio, "音轨", self._audio_data_url)
+            )
+        # 关键帧模式只收尾帧、参考模式只收音频，两个可选输入同时给时没有合法模式。
+        if last_frame_url and audio_urls:
+            raise ValueError("尾帧(关键帧)与音轨(参考)不能同时使用")
 
         resolved = str(mode or payload.get("mode") or self.mode or "auto").strip().lower()
         if resolved in ("", "auto"):
-            if image_urls or payload.get("first_frame") or payload.get("last_frame"):
+            if (
+                image_urls
+                or last_frame_url
+                or payload.get("first_frame")
+                or payload.get("last_frame")
+            ):
                 resolved = "keyframe"
-            elif payload.get("images") or payload.get("audios"):
+            elif payload.get("images") or payload.get("audios") or audio_urls:
                 resolved = "reference"
             else:
                 resolved = "text" if not (image_urls or audio_urls) else "reference"
         payload["mode"] = resolved
+
+        if last_frame_url:
+            if resolved != "keyframe":
+                raise ValueError("尾帧只能在关键帧模式下使用")
+            if payload.get("last_frame"):
+                raise ValueError("尾帧与已配置尾帧冲突, 请移除固定尾帧")
+            payload["last_frame"] = last_frame_url
 
         if image_urls:
             if resolved == "keyframe":
@@ -210,6 +241,12 @@ class AgnesVideoService(VideoBackend):
                 raise ValueError("Agnes audios 必须为列表")
             payload["audios"] = [*audio_urls, *existing_audio]
 
+        logger.info(
+            "[aiimg] 视频请求：首帧=%s 尾帧=%s 音轨=%s",
+            "是" if payload.get("first_frame") else "否",
+            "是" if payload.get("last_frame") else "否",
+            "是" if payload.get("audios") else "否",
+        )
         self.validate_payload(payload)
         return payload
 
@@ -219,6 +256,17 @@ class AgnesVideoService(VideoBackend):
             raise ValueError("Agnes 图片需小于 15 MB")
         mime, _ = guess_image_mime_and_ext(data)
         return "data:" + mime + ";base64," + base64.b64encode(data).decode("ascii")
+
+    def _optional_data_url(
+        self, path: Path, label: str, encode: Callable[[Path], str]
+    ) -> str:
+        """复用现有编码函数，只把读不到文件换成中文错误。"""
+        try:
+            return encode(path)
+        except FileNotFoundError as exc:
+            raise ValueError(f"{label}文件不存在: {Path(path).name}") from exc
+        except OSError as exc:
+            raise ValueError(f"{label}文件读取失败: {exc}") from exc
 
     @staticmethod
     def _audio_data_url(path: Path) -> str:
@@ -259,13 +307,19 @@ class AgnesVideoService(VideoBackend):
             if isinstance(value, list) and len(value) > limit:
                 raise ValueError(f"Agnes {name} 必须为列表且最多 {limit} 项")
         urls = [payload[key] for key in ("first_frame", "last_frame") if payload.get(key)]
-        urls += payload.get("images", []) + payload.get("audios", [])
+        urls += payload.get("images", [])
         if any(
             not isinstance(item, str)
             or not item.startswith(("https://", "http://", "data:image/"))
             for item in urls
         ):
             raise ValueError("Agnes 媒体需为有效 URL")
+        if any(
+            not isinstance(item, str)
+            or not item.startswith(("https://", "http://", "data:audio/"))
+            for item in payload.get("audios", [])
+        ):
+            raise ValueError("Agnes 音频需为有效 URL")
 
     # -- http ---------------------------------------------------------------
 
@@ -438,6 +492,8 @@ class AgnesVideoService(VideoBackend):
         mode: str = "",
         images: list[Path] | None = None,
         audios: list[Path] | None = None,
+        last_frame: Path | None = None,
+        audio: Path | None = None,
         extra: dict | None = None,
     ) -> VideoResult:
         if not self.api_key:
@@ -449,6 +505,8 @@ class AgnesVideoService(VideoBackend):
                 mode=mode,
                 images=images,
                 audios=audios,
+                last_frame=last_frame,
+                audio=audio,
                 extra=extra,
             )
         except ValueError as exc:

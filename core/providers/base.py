@@ -184,6 +184,8 @@ class VideoBackend:
         mode: str = "",
         images: list[Path] | None = None,
         audios: list[Path] | None = None,
+        last_frame: Path | None = None,
+        audio: Path | None = None,
         extra: dict[str, Any] | None = None,
     ) -> VideoResult:
         raise NotImplementedError

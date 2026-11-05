@@ -37,14 +37,16 @@ _STATUS_LABELS: dict[str, str] = {
     "queued": "排队中",
     "running": "运行中",
     "succeeded": "已成功",
+    "partial": "部分完成",
     "failed": "已失败",
     "cancelled": "已取消",
 }
-_TERMINAL_STATES = frozenset({"succeeded", "failed", "cancelled"})
+_TERMINAL_STATES = frozenset({"succeeded", "partial", "failed", "cancelled"})
 _TRANSITIONS: dict[str, frozenset[str]] = {
     "queued": frozenset({"running", "succeeded", "failed", "cancelled"}),
     "running": frozenset({"succeeded", "failed", "cancelled"}),
-    "succeeded": frozenset(),
+    "succeeded": frozenset({"partial"}),
+    "partial": frozenset(),
     "failed": frozenset(),
     "cancelled": frozenset(),
 }
@@ -277,6 +279,17 @@ class TaskStore:
                 attempts INTEGER NOT NULL DEFAULT 0,
                 delivery_state TEXT NOT NULL DEFAULT '',
                 delivery_attempts INTEGER NOT NULL DEFAULT 0
+            );
+            -- 批量任务的每一张单独记一行，重试和查进度都按这一行来。
+            CREATE TABLE IF NOT EXISTS task_items (
+                task_id TEXT NOT NULL,
+                idx INTEGER NOT NULL,
+                prompt TEXT NOT NULL DEFAULT '',
+                state TEXT NOT NULL DEFAULT 'queued',
+                error TEXT NOT NULL DEFAULT '',
+                image_ref TEXT NOT NULL DEFAULT '',
+                updated_at INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (task_id, idx)
             )
             """
         )
@@ -582,6 +595,83 @@ class TaskStore:
         logger.debug(
             "任务 %s 投递结果：%s，尝试 %d 次", task_id, state or "-", int(attempts or 0)
         )
+
+    # -- batch items --------------------------------------------------------
+
+    @_serialized
+    def seed_items(self, task_id: str, prompts: list[tuple[int, str]]) -> None:
+        """Write one row per batch prompt so每张都有自己的状态和编号。"""
+        rows = [
+            (str(task_id), int(index), str(text or ""), "queued", "", "", _now())
+            for index, text in prompts
+            if str(text or "").strip()
+        ]
+        self._db.execute("DELETE FROM task_items WHERE task_id=?", (str(task_id),))
+        self._db.executemany(
+            "INSERT INTO task_items (task_id, idx, prompt, state, error, image_ref, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        self._db.commit()
+        logger.info("任务 %s 登记批量子项 %d 张", task_id, len(rows))
+
+    @_serialized
+    def set_item(
+        self,
+        task_id: str,
+        index: int,
+        state: str,
+        *,
+        error: str = "",
+        image_ref: str = "",
+    ) -> None:
+        self._db.execute(
+            "UPDATE task_items SET state=?, error=?, image_ref=?, updated_at=?"
+            " WHERE task_id=? AND idx=?",
+            (
+                str(state or ""),
+                _clean_text(error),
+                str(image_ref or ""),
+                _now(),
+                str(task_id),
+                int(index),
+            ),
+        )
+        self._db.commit()
+        logger.debug(
+            "任务 %s 第 %d 张：%s%s",
+            task_id,
+            int(index) + 1,
+            state or "-",
+            f"（{clip(error, 80)}）" if error else "",
+        )
+
+    @_serialized
+    def list_items(self, task_id: str) -> list[dict]:
+        rows = self._db.execute(
+            "SELECT idx, prompt, state, error, image_ref FROM task_items"
+            " WHERE task_id=? ORDER BY idx",
+            (str(task_id),),
+        ).fetchall()
+        return [
+            {
+                "index": int(row["idx"]),
+                "prompt": str(row["prompt"] or ""),
+                "state": str(row["state"] or ""),
+                "error": str(row["error"] or ""),
+                "image_ref": str(row["image_ref"] or ""),
+            }
+            for row in rows
+        ]
+
+    @_serialized
+    def prune_items(self) -> int:
+        """Drop item rows whose parent task is gone."""
+        cursor = self._db.execute(
+            "DELETE FROM task_items WHERE task_id NOT IN (SELECT task_id FROM tasks)"
+        )
+        self._db.commit()
+        return int(cursor.rowcount or 0)
 
     @_serialized
     def cancel(self, task_id: str) -> bool:

@@ -7,8 +7,12 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from typing import Any, Callable
+
+
+logger = logging.getLogger("kira_plugin_aiimg.delivery")
 
 
 class DeliveryResult:
@@ -69,6 +73,61 @@ def route_summary(elements: list[Any]) -> str:
         route = payload_route(element)
         counts[route] = counts.get(route, 0) + 1
     return "、".join(f"{name} {count} 个" for name, count in counts.items()) or "空"
+
+
+# 视频发法只有三档；顺序与配置页下发的字符串一一对应。
+VIDEO_SEND_MODES = ("auto", "url", "file")
+
+
+def normalize_send_mode(value: str) -> str:
+    """配置里的发法归一化：空值、脏值一律当 auto，大小写无所谓。"""
+    text = str(value or "").strip().lower()
+    return text if text in VIDEO_SEND_MODES else "auto"
+
+
+def plan_video_attempts(
+    mode: str,
+    file_path: str,
+    url: str,
+) -> list[tuple[str, str]]:
+    """算出这次视频要按什么顺序发：先本地文件、后链接，缺哪个跳哪个。
+
+    纯规划，不碰网络也不碰文件系统：调用方拿着这份清单自己去建 Video 元素。
+    返回 (种类, 路径或链接) 的列表，空列表表示这个模式下没有可用素材。
+    """
+    chosen = normalize_send_mode(mode)
+    local = str(file_path or "").strip()
+    remote = str(url or "").strip()
+    if chosen == "file":
+        return [("file", local)] if local else []
+    if chosen == "url":
+        return [("url", remote)] if remote else []
+    attempts: list[tuple[str, str]] = []
+    if local:
+        attempts.append(("file", local))
+    if remote:
+        attempts.append(("url", remote))
+    unique: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for kind, value in attempts:
+        if value in seen:
+            continue
+        seen.add(value)
+        unique.append((kind, value))
+    return unique
+
+
+def log_video_attempts(task_id: str, mode: str, attempts) -> None:
+    """一行说清这次打算怎么发；只报次数和种类，链接不进日志。"""
+    plan = list(attempts or [])
+    kinds = "、".join(kind for kind, _value in plan) or "无"
+    logger.info(
+        "[aiimg] 视频投递：任务 %s 方式=%s，计划 %d 次（file/url 顺序，%s）",
+        task_id,
+        normalize_send_mode(mode),
+        len(plan),
+        kinds,
+    )
 
 
 async def _send_once(

@@ -39,7 +39,12 @@ from .core import refs as refs_mod
 from .core import settings as settings_mod
 from .core.chains import ChainItem, chain_for
 from .core.debounce import Debouncer
-from .core.delivery import deliver_chain
+from .core.delivery import (
+    deliver_chain,
+    log_video_attempts,
+    normalize_send_mode,
+    plan_video_attempts,
+)
 from .core.http import close_http, current_session
 from .core.image_store import ImageStore
 from .core.image_format import validate_image_bytes
@@ -525,7 +530,11 @@ class AIImagePlugin(BasePlugin):
 
     def _preset_map(self, kind: str) -> dict[str, str]:
         """Parse "name: prompt" preset lines into a lookup table."""
-        key = "draw_presets" if kind == "generate" else "edit_presets"
+        key = {
+            "generate": "draw_presets",
+            "edit": "edit_presets",
+            "video": "video_presets",
+        }.get(kind, "draw_presets")
         raw = self._cfg("section_prompts", key)
         if raw is None:
             raw = settings_mod.field_default("section_prompts", key, "")
@@ -727,6 +736,9 @@ class AIImagePlugin(BasePlugin):
             )
             if pruned:
                 logger.info("[aiimg] 清理了 %d 条过期任务记录", pruned)
+            orphans = self._store.prune_items()
+            if orphans:
+                logger.info("[aiimg] 顺手清掉 %d 条孤立批量子项", orphans)
         except Exception as exc:
             logger.warning("[aiimg] 清理任务记录失败：%s", exc)
 
@@ -1111,18 +1123,22 @@ class AIImagePlugin(BasePlugin):
         }
         return runners.get(kind, (self._run_generate, False))
 
-    def _retry_record(self, record: TaskRecord) -> TaskRecord:
+    def _retry_record(
+        self, record: TaskRecord, *, prompts: list[str] | None = None
+    ) -> TaskRecord:
         """Clone a failed task so it keeps its prompt, chain and parameters."""
         extra = dict(record.extra or {})
         # Prompt layers and the final prompt are rebuilt by the runner.
         for key in ("prompt_layers", "final_prompt"):
             extra.pop(key, None)
+        if prompts is not None:
+            extra["prompts"] = list(prompts)
         return self._store.create(
             kind=record.kind,
             sid=record.sid,
             session_type=str(extra.get("session_type") or record.session_type),
             user_id=record.user_id,
-            prompt=record.prompt,
+            prompt=prompts[0] if prompts else record.prompt,
             provider=record.provider,
             chain=list(record.chain or []),
             size=record.size,
@@ -1672,6 +1688,15 @@ class AIImagePlugin(BasePlugin):
                 "seconds": {"type": "string", "description": "时长（秒），4 到 12"},
                 "aspect_ratio": {"type": "string", "description": "比例，16:9/9:16/1:1/3:4/4:3/21:9"},
                 "mode": {"type": "string", "description": "生成模式 auto/text/keyframe/reference"},
+                "last_frame": {
+                    "type": "string",
+                    "description": "尾帧图，可留空；支持 'latest'、find_image 编号或本地路径",
+                },
+                "audio": {
+                    "type": "string",
+                    "description": "背景音轨，本地音频路径，文件要放在插件数据目录里",
+                },
+                "preset": {"type": "string", "description": "视频预设名，取视频预设提示词里的名字"},
             },
             "required": ["prompt"],
         },
@@ -1685,6 +1710,9 @@ class AIImagePlugin(BasePlugin):
         seconds: str = "",
         aspect_ratio: str = "",
         mode: str = "",
+        last_frame: str = "",
+        audio: str = "",
+        preset: str = "",
     ) -> str:
         if not self._ready or not self._gallery:
             return "插件未就绪"
@@ -1730,19 +1758,55 @@ class AIImagePlugin(BasePlugin):
             for note in notes:
                 logger.info("[aiimg] 视频关键帧：%s", note)
             input_path = str(kept[0][0]) if kept else ""
+        last_path = ""
+        if str(last_frame or "").strip():
+            last_path = str(
+                await self._resolve_input_image(event, str(last_frame).strip()) or ""
+            )
+            if not last_path:
+                return self._denied("generate_video", "尾帧图不存在")
+            try:
+                kept, notes = await self._plan_references(
+                    event, [(Path(last_path), "base")]
+                )
+            except ValueError as exc:
+                return str(exc)
+            for note in notes:
+                logger.info("[aiimg] 视频尾帧：%s", note)
+            last_path = str(kept[0][0]) if kept else ""
+        audio_path = ""
+        if str(audio or "").strip():
+            candidate = Path(str(audio).strip()).expanduser()
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                return self._denied("generate_video", "音频文件不存在")
+            if not resolved.is_file():
+                return self._denied("generate_video", "音频文件不存在")
+            if self._data_dir is None or not resolved.is_relative_to(self._data_dir):
+                return self._denied("generate_video", "音频只能放在插件数据目录")
+            audio_path = str(resolved)
+        caller_prompt = str(prompt or "")
+        video_prompt, preset_name = self._apply_preset(caller_prompt, preset, "video")
         extra = self._task_extra(
             event,
             seconds=seconds_text,
             aspect_ratio=ratio,
             mode=mode_text,
             input_image=input_path,
+            last_frame=last_path,
+            audio=audio_path,
             chain_items=[self._chain_item_dict(item) for item in chain],
         )
+        if preset_name:
+            extra["preset"] = preset_name
+            extra["preset_text"] = self._preset_map("video").get(preset_name.lower(), "")
+            extra["caller_prompt"] = caller_prompt
         record = self._store.create(
             kind="generate_video",
             sid=event.sid,
             user_id=self._user_id(event),
-            prompt=prompt,
+            prompt=video_prompt,
             provider=chain[0].provider_id,
             chain=[item.provider_id for item in chain],
             size=ratio or "",
@@ -2367,6 +2431,24 @@ class AIImagePlugin(BasePlugin):
                 )
         return ""
 
+    def _item_rows(self, task_id: str) -> list[dict[str, Any]]:
+        """List one batch task's per-image state for the tools and the console."""
+        if self._store is None:
+            return []
+        rows: list[dict[str, Any]] = []
+        for item in self._store.list_items(task_id):
+            row: dict[str, Any] = {
+                "index": item["index"] + 1,
+                "state": item["state"],
+                "prompt": item["prompt"],
+            }
+            if item["image_ref"]:
+                row["image_ref"] = item["image_ref"]
+            if item["error"]:
+                row["error_kind"] = self._error_kind(item["error"])
+            rows.append(row)
+        return rows
+
     def _describe_task(self, record: TaskRecord) -> str:
         payload: dict[str, Any] = {
             "status": "ok",
@@ -2395,6 +2477,12 @@ class AIImagePlugin(BasePlugin):
             if result.get("url"):
                 payload["kind"] = "video"
                 payload["media_count"] = 1
+        if self._store is not None and record.kind == "generate_image_batch":
+            items = self._item_rows(record.task_id)
+            if items:
+                done = sum(1 for item in items if item["state"] == "done")
+                payload["progress"] = f"{done}/{len(items)}"
+                payload["items"] = items
         return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     # ------------------------------------------------------------------
@@ -2470,7 +2558,20 @@ class AIImagePlugin(BasePlugin):
         )
 
     async def _run_batch(self, record: TaskRecord) -> dict:
-        items = record.extra.get("prompts") or [record.prompt]
+        raw_items = record.extra.get("prompts") or [record.prompt]
+        plans: list[tuple[int, str, str]] = []
+        for index, item in enumerate(raw_items):
+            if isinstance(item, dict):
+                prompt_text = str(item.get("prompt") or "").strip()
+                plan_output = str(item.get("output") or "").strip()
+            else:
+                prompt_text = str(item or "").strip()
+                plan_output = ""
+            if prompt_text:
+                plans.append((index, prompt_text, plan_output))
+        if not plans:
+            raise RuntimeError("批量任务没有可用的提示词")
+        self._store.seed_items(record.task_id, [(i, text) for i, text, _ in plans])
         concurrency = int(self._cfg("section_queue", "batch_concurrency", default=2) or 2)
         semaphore = asyncio.Semaphore(max(1, concurrency))
         media: list[str] = []
@@ -2479,16 +2580,8 @@ class AIImagePlugin(BasePlugin):
         size = ""
         errors: list[str] = []
 
-        async def one(index: int, item: Any) -> None:
+        async def one(index: int, prompt_text: str, plan_output: str) -> None:
             nonlocal provider, model, size
-            if isinstance(item, dict):
-                prompt_text = str(item.get("prompt") or "").strip()
-                plan_output = str(item.get("output") or "").strip()
-            else:
-                prompt_text = str(item or "").strip()
-                plan_output = ""
-            if not prompt_text:
-                return
             async with semaphore:
                 extra = dict(record.extra)
                 if plan_output:
@@ -2504,6 +2597,7 @@ class AIImagePlugin(BasePlugin):
                     size=record.size,
                     extra=extra,
                 )
+                self._store.set_item(record.task_id, index, "running")
                 try:
                     source = str(extra.get("input_image") or "")
                     images = [Path(source)] if source else None
@@ -2516,10 +2610,22 @@ class AIImagePlugin(BasePlugin):
                     provider = result.get("provider") or provider
                     model = result.get("model") or model
                     size = result.get("size") or size
+                    refs = [str(item) for item in (result.get("refs") or []) if item]
+                    self._store.set_item(
+                        record.task_id,
+                        index,
+                        "done",
+                        image_ref=refs[0] if refs else "",
+                    )
+                except asyncio.CancelledError:
+                    self._store.set_item(record.task_id, index, "failed", error="任务被取消")
+                    raise
                 except Exception as exc:
                     errors.append(f"{index + 1}: {exc}")
+                    self._store.set_item(record.task_id, index, "failed", error=str(exc))
 
-        await asyncio.gather(*(one(i, p) for i, p in enumerate(items)))
+        await asyncio.gather(*(one(i, text, output) for i, text, output in plans))
+        items = self._store.list_items(record.task_id)
         if not media:
             raise RuntimeError("批量生成全部失败: " + " | ".join(errors))
         return {
@@ -2530,6 +2636,7 @@ class AIImagePlugin(BasePlugin):
             "caption": "",
             "count": len(media),
             "partial_errors": errors,
+            "items": items,
         }
 
     async def _render_video_frame(self, record: TaskRecord, source: Path) -> Path | None:
@@ -2567,6 +2674,66 @@ class AIImagePlugin(BasePlugin):
             return Path(path)
         return None
 
+    async def _video_opening_frame(self, record: TaskRecord) -> str:
+        """视频没有关键帧时先找一张：最近生成的图，或者现拍一张自拍。"""
+        if str(record.extra.get("mode") or "auto") == "text":
+            return ""
+        if record.extra.get("last_frame") or record.extra.get("audio"):
+            # 用户明确只要尾帧或音轨，补一张开场图反而会改变他选的模式。
+            return ""
+        if self._gallery is not None:
+            try:
+                sid = record.sid if self._scoped() else ""
+                for item in self._gallery.latest_image_paths(sid, limit=1):
+                    path = Path(str(item))
+                    if path.is_file():
+                        logger.info(
+                            "[aiimg] 视频任务 %s 没有关键帧，用最近一张图：%s",
+                            record.task_id,
+                            path.name,
+                        )
+                        return str(path)
+            except Exception as exc:
+                logger.debug("[aiimg] 视频任务 %s 查最近图片失败：%s", record.task_id, exc)
+        if not self._feature_on("selfie_enabled"):
+            logger.info("[aiimg] 视频任务 %s 没有关键帧，改走纯文字生成", record.task_id)
+            return ""
+        plan = await self._selfie_reference_plan()
+        chain = self._selfie_chain()
+        if not plan or not chain:
+            logger.info("[aiimg] 视频任务 %s 没有自拍参考图，改走纯文字生成", record.task_id)
+            return ""
+        sub = TaskRecord(
+            task_id=f"{record.task_id}-frame",
+            kind="generate_selfie",
+            sid=record.sid,
+            user_id=record.user_id,
+            prompt=f"{record.prompt}，自拍开场画面",
+            provider=chain[0].provider_id,
+            chain=[item.provider_id for item in chain],
+            size="",
+            extra={
+                "reference_images": [str(path.resolve()) for path, _role in plan],
+                "reference_roles": [role for _path, role in plan],
+                "chain_items": [self._chain_item_dict(item) for item in chain],
+                "session_type": record.session_type,
+            },
+        )
+        try:
+            result = await self._run_selfie(sub)
+        except Exception as exc:
+            logger.warning("[aiimg] 视频任务 %s 先生成自拍失败：%s", record.task_id, exc)
+            return ""
+        media = [str(item) for item in (result.get("media") or []) if item]
+        if not media:
+            return ""
+        logger.info(
+            "[aiimg] 视频任务 %s 先生成了一张自拍开场图：%s",
+            record.task_id,
+            Path(media[0]).name,
+        )
+        return media[0]
+
     async def _run_video(self, record: TaskRecord) -> dict:
         chain_items = record.extra.get("chain_items") or [
             {"provider": p, "output": ""} for p in record.chain
@@ -2581,6 +2748,11 @@ class AIImagePlugin(BasePlugin):
                 logger.info("[aiimg] 视频任务 %s 开场帧就绪：%s", record.task_id, Path(frame).name)
             else:
                 logger.info("[aiimg] 视频任务 %s 没有开场帧，直接用参考图", record.task_id)
+        if not source_path:
+            source_path = await self._video_opening_frame(record)
+            if source_path:
+                record.extra["input_image"] = source_path
+                self._store.upsert(record)
         last_error = ""
         upcoming = [item["provider"] for item in chain_items]
         logger.info(
@@ -2613,12 +2785,26 @@ class AIImagePlugin(BasePlugin):
             try:
                 input_path = record.extra.get("input_image") or ""
                 images = [Path(input_path)] if input_path and Path(input_path).exists() else []
+                last_frame_path = str(record.extra.get("last_frame") or "")
+                last_frame_file = (
+                    Path(last_frame_path)
+                    if last_frame_path and Path(last_frame_path).is_file()
+                    else None
+                )
+                audio_path = str(record.extra.get("audio") or "")
+                audio_file = (
+                    Path(audio_path)
+                    if audio_path and Path(audio_path).is_file()
+                    else None
+                )
                 async with self._provider_slot(provider_id):
                     result = await backend.generate_video(
                         record.prompt,
                         seconds=record.extra.get("seconds") or "",
                         mode=record.extra.get("mode") or "",
                         images=images or None,
+                        last_frame=last_frame_file,
+                        audio=audio_file,
                         extra={"aspect_ratio": record.extra.get("aspect_ratio") or ""},
                     )
                 video_path = await self._download_video(result.url, provider_id)
@@ -2653,6 +2839,7 @@ class AIImagePlugin(BasePlugin):
                 return {
                     "media": [str(video_path)],
                     "url": "",
+                    "source_url": str(result.url or ""),
                     "refs": refs,
                     "provider": provider_id,
                     "model": result.model,
@@ -2978,6 +3165,16 @@ class AIImagePlugin(BasePlugin):
             payload = json.loads(record.result or "{}")
         except Exception:
             payload = {}
+        partial_errors = payload.get("partial_errors") or []
+        if record.kind == "generate_image_batch" and partial_errors:
+            self._store.set_status(record.task_id, "partial")
+            record.status = "partial"
+            logger.info(
+                "[aiimg] 批量任务 %s 部分完成：%d 张成功，%d 张失败",
+                record.task_id,
+                len(payload.get("media") or []),
+                len(partial_errors),
+            )
         elements: list[Any] = []
         facts: dict[str, str] = {
             "task_id": record.task_id,
@@ -2992,6 +3189,8 @@ class AIImagePlugin(BasePlugin):
         }
         media = payload.get("media") or []
         refs = [str(item) for item in (payload.get("refs") or []) if item]
+        if partial_errors:
+            facts["failed_count"] = str(len(partial_errors))
         if refs:
             facts["image_ref"] = refs[0]
             if len(refs) > 1:
@@ -3018,7 +3217,12 @@ class AIImagePlugin(BasePlugin):
         # The synthetic event below reaches the model only; whatever it replies
         # is a separate message, so an empty reply can no longer swallow the
         # image.
-        delivered, send_attempts = await self._send_media(record.sid, elements)
+        delivered, send_attempts = await self._send_media(
+            record.sid,
+            elements,
+            video_url=str(payload.get("source_url") or payload.get("url") or ""),
+            task_id=record.task_id,
+        )
         self._record_delivery(record, delivered, send_attempts)
         if delivered:
             self._mark_ack_delivered(record.task_id)
@@ -3112,9 +3316,20 @@ class AIImagePlugin(BasePlugin):
             chains.append(images[start : start + _IMAGES_PER_MESSAGE])
         return chains
 
-    async def _send_media(self, sid: str, elements: list[Any]) -> tuple[bool, int]:
+    async def _send_media(
+        self,
+        sid: str,
+        elements: list[Any],
+        *,
+        video_url: str = "",
+        task_id: str = "",
+    ) -> tuple[bool, int]:
         """分条发送结果，返回（是否全部送达, 尝试的条数）。"""
         chains = self._media_chains(elements)
+        advanced = self._cfg("section_advanced") or {}
+        if not isinstance(advanced, dict):
+            advanced = {}
+        mode = normalize_send_mode(str(advanced.get("video_send_mode") or "auto"))
         total_attempts = 0
         sent = 0
         for index, chain in enumerate(chains, 1):
@@ -3126,6 +3341,32 @@ class AIImagePlugin(BasePlugin):
                 "视频" if is_video else "图片",
                 len(chain),
             )
+            if is_video:
+                file_path = str(getattr(chain[0], "file", "") or "")
+                attempts = plan_video_attempts(mode, file_path, video_url)
+                log_video_attempts(task_id or "-", mode, attempts)
+                ok = False
+                for kind, value in attempts:
+                    total_attempts += 1
+                    try:
+                        # Video 的 file 既可以是本地路径，也可以是链接。
+                        candidate = Video(file=value)
+                    except Exception as exc:
+                        logger.warning("[aiimg] 视频按 %s 发送没有成功：%s", kind, exc)
+                        continue
+                    ok = await self._safe_send(sid, MessageChain([candidate]))
+                    if ok:
+                        break
+                if ok:
+                    sent += 1
+                else:
+                    logger.warning(
+                        "[aiimg] 第 %d/%d 条视频没发出去（方式 %s）",
+                        index,
+                        len(chains),
+                        mode,
+                    )
+                continue
             ok = await self._safe_send(sid, MessageChain(chain))
             total_attempts += 1
             if ok:
@@ -3251,19 +3492,42 @@ class AIImagePlugin(BasePlugin):
 
     @on.llm_request()
     async def _inject_presets(self, event, req: LLMRequest, *_):
-        """Tell the model which named presets it may pass to the image tools."""
+        """Tell the model which named presets and saved inspirations it may use."""
         draw = self._preset_map("generate")
         edit = self._preset_map("edit")
-        if not draw and not edit:
+        video = self._preset_map("video")
+        inspirations: list[dict] = []
+        if self._inspiration is not None:
+            try:
+                inspirations = self._inspiration.list(
+                    sid=event.sid,
+                    scoped=self._scoped(),
+                    limit=8,
+                )
+            except Exception as exc:
+                logger.debug("[aiimg] 读取灵感库失败：%s", exc)
+        if not draw and not edit and not video and not inspirations:
             return
         lines: list[str] = []
         intro = self._prompts("presets_prompt", "")
-        if intro:
+        if intro and (draw or edit or video):
             lines.append(intro)
         for name, text in draw.items():
             lines.append(f"- {name}（文生图）：{text}")
         for name, text in edit.items():
             lines.append(f"- {name}（改图）：{text}")
+        for name, text in video.items():
+            lines.append(f"- {name}（视频）：{text}")
+        if inspirations:
+            inspiration_intro = self._prompts("inspiration_prompt", "")
+            if inspiration_intro:
+                lines.append(inspiration_intro)
+            for entry in inspirations:
+                text = str(entry.get("text") or "").strip()
+                if text:
+                    lines.append(f"- {text}")
+        if not lines:
+            return
         content = "\n".join(lines)
         for prompt in getattr(req, "system_prompt", []) or []:
             if getattr(prompt, "name", "") == "aiimg_presets":
@@ -3275,6 +3539,12 @@ class AIImagePlugin(BasePlugin):
             )
         except Exception as exc:
             logger.debug("[aiimg] 注入预设说明失败：%s", exc)
+        else:
+            logger.info(
+                "[aiimg] 注入系统提示：预设 %d 条、灵感 %d 条",
+                len(draw) + len(edit) + len(video),
+                len(inspirations),
+            )
 
     @on.llm_request(priority=Priority.LOW)
     async def _hide_builtin_media_tags(self, event, req, tag_set, *_):
@@ -3607,7 +3877,17 @@ class AIImagePlugin(BasePlugin):
             limit=min(max(1, limit), 200),
             offset=max(0, offset),
         )
-        return {"tasks": [record.to_dict() for record in records], "total": total}
+        tasks: list[dict[str, Any]] = []
+        for record in records:
+            row = record.to_dict()
+            if record.kind == "generate_image_batch":
+                items = self._item_rows(record.task_id)
+                if items:
+                    done = sum(1 for item in items if item["state"] == "done")
+                    row["progress"] = f"{done}/{len(items)}"
+                    row["items"] = items
+            tasks.append(row)
+        return {"tasks": tasks, "total": total}
 
     @register.api(method="GET", path="/aiimg/inspirations", auth=True, summary="灵感库")
     async def api_inspirations(self):
@@ -3718,14 +3998,34 @@ class AIImagePlugin(BasePlugin):
         record = self._store.get(target)
         if record is None:
             return {"ok": False, "error": "任务不存在"}
-        if record.status != "failed":
+        only_failed = bool(data.get("only_failed"))
+        items = (
+            self._store.list_items(record.task_id)
+            if record.kind == "generate_image_batch"
+            else []
+        )
+        failed = [item for item in items if item["state"] == "failed"]
+        if only_failed:
+            if not failed:
+                return {"ok": False, "error": "这个任务没有失败的子项"}
+        elif record.status != "failed":
             return {"ok": False, "error": "只有失败的任务可以重试"}
-        retry = self._retry_record(record)
+        retry = self._retry_record(
+            record,
+            prompts=[item["prompt"] for item in failed] if only_failed else None,
+        )
         runner, is_batch = self._task_runner(record.kind)
         try:
             await self._submit(retry, runner, is_batch=is_batch)
         except (QueueFullError, UserLimitError) as exc:
             return {"ok": False, "error": str(exc), "task_id": retry.task_id}
+        if only_failed:
+            logger.info(
+                "[aiimg] 批量任务 %s 重试失败子项 %d 张，新任务 %s",
+                record.task_id,
+                len(failed),
+                retry.task_id,
+            )
         return {"ok": True, "task_id": retry.task_id, "source": record.task_id}
 
     @register.api(method="GET", path="/aiimg/gallery", auth=True, summary="画廊")

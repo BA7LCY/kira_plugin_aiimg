@@ -78,6 +78,9 @@ class _Gallery:
     async def save_image(self, data, **kwargs):
         return "media/fake.png"
 
+    def latest_image_paths(self, sid, limit=1):
+        return []
+
 
 class _Store:
     def set_audit(self, *args, **kwargs):
@@ -139,6 +142,12 @@ class _Registry:
         if provider_id not in self._settings:
             raise KeyError(provider_id)
         return self._settings[provider_id]
+
+    def image_provider_ids(self):
+        return list(self._backends)
+
+    def video_provider_ids(self):
+        return list(self._backends)
 
 
 def _prepare(plugin_module, tmp_path, backends, *, threshold=3, settings=None, config=None):

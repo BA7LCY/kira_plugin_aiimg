@@ -101,6 +101,19 @@ def _png(tmp_path) -> pathlib.Path:
     return path
 
 
+def _audio(tmp_path) -> pathlib.Path:
+    path = pathlib.Path(tempfile.mkdtemp(dir=tmp_path)) / "a.mp3"
+    path.write_bytes(b"ID3\x04\x00\x00\x00\x00\x00\x00mock-audio")
+    return path
+
+
+def _offline(tmp_path) -> AgnesVideoService:
+    # 只构造请求体，不连服务端。
+    service = AgnesVideoService(_settings("http://127.0.0.1:9/v1"), tmp_path)
+    service.interval = 0
+    return service
+
+
 def test_endpoints_are_derived_from_base(mock, tmp_path):
     async def scenario():
         async with mock:
@@ -324,3 +337,140 @@ def test_poll_falls_back_to_task_endpoint(mock, tmp_path):
             await service.close()
 
     asyncio.run(scenario())
+
+
+def test_default_payload_matches_legacy_shape(tmp_path):
+    service = _offline(tmp_path)
+    payload = service.build_payload("一只猫", seconds="5")
+    assert payload == {
+        "model": "agnes-video-2.5-flash",
+        "seconds": "5",
+        "size": "720P",
+        "aspect_ratio": "16:9",
+        "n": 1,
+        "prompt": "一只猫",
+        "mode": "text",
+    }
+    # 键顺序也保持旧版，可选输入不传时一个字段都不多。
+    assert list(payload) == [
+        "model",
+        "seconds",
+        "size",
+        "aspect_ratio",
+        "n",
+        "prompt",
+        "mode",
+    ]
+    assert "last_frame" not in payload
+    assert "audios" not in payload
+
+
+def test_last_frame_is_sent_in_keyframe_mode(mock, tmp_path):
+    async def scenario():
+        async with mock:
+            service = _service(mock, tmp_path)
+            mock.statuses = ["completed"]
+            await _run(
+                service.generate_video(
+                    "x",
+                    seconds="5",
+                    images=[_png(tmp_path)],
+                    last_frame=_png(tmp_path),
+                )
+            )
+            payload = mock.creates[0]
+            assert payload["mode"] == "keyframe"
+            assert payload["first_frame"].startswith("data:image/png;base64,")
+            assert payload["last_frame"].startswith("data:image/png;base64,")
+            assert "audios" not in payload
+            await service.close()
+
+    asyncio.run(scenario())
+
+
+def test_audio_is_sent_in_reference_mode(mock, tmp_path):
+    async def scenario():
+        async with mock:
+            service = _service(mock, tmp_path)
+            mock.statuses = ["completed"]
+            await _run(service.generate_video("x", seconds="5", audio=_audio(tmp_path)))
+            payload = mock.creates[0]
+            assert payload["mode"] == "reference"
+            assert payload["audios"][0].startswith("data:audio/mpeg;base64,")
+            assert "last_frame" not in payload
+            await service.close()
+
+    asyncio.run(scenario())
+
+
+def test_last_frame_rejected_outside_keyframe_mode(mock, tmp_path):
+    async def scenario():
+        async with mock:
+            service = _service(mock, tmp_path)
+            with pytest.raises(AgnesVideoError) as exc:
+                await _run(
+                    service.generate_video(
+                        "x", seconds="5", mode="reference", last_frame=_png(tmp_path)
+                    )
+                )
+            assert "尾帧只能在关键帧模式下使用" in str(exc.value)
+            assert mock.creates == []
+            await service.close()
+
+    asyncio.run(scenario())
+
+
+def test_last_frame_and_audio_conflict(mock, tmp_path):
+    async def scenario():
+        async with mock:
+            service = _service(mock, tmp_path)
+            with pytest.raises(AgnesVideoError) as exc:
+                await _run(
+                    service.generate_video(
+                        "x",
+                        seconds="5",
+                        last_frame=_png(tmp_path),
+                        audio=_audio(tmp_path),
+                    )
+                )
+            assert "不能同时使用" in str(exc.value)
+            assert exc.value.stop_provider_chain is True
+            assert mock.creates == []
+            await service.close()
+
+    asyncio.run(scenario())
+
+
+def test_missing_last_frame_file_reports_chinese_error(mock, tmp_path):
+    async def scenario():
+        async with mock:
+            service = _service(mock, tmp_path)
+            with pytest.raises(AgnesVideoError) as exc:
+                await _run(
+                    service.generate_video(
+                        "x", seconds="5", last_frame=tmp_path / "nope.png"
+                    )
+                )
+            assert "尾帧文件不存在" in str(exc.value)
+            assert mock.creates == []
+            await service.close()
+
+    asyncio.run(scenario())
+
+
+def test_missing_audio_file_reports_chinese_error(mock, tmp_path):
+    async def scenario():
+        async with mock:
+            service = _service(mock, tmp_path)
+            with pytest.raises(AgnesVideoError) as exc:
+                await _run(
+                    service.generate_video(
+                        "x", seconds="5", audio=tmp_path / "nope.mp3"
+                    )
+                )
+            assert "音轨文件不存在" in str(exc.value)
+            assert mock.creates == []
+            await service.close()
+
+    asyncio.run(scenario())
+

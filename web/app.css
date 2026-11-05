@@ -918,6 +918,13 @@ table.data .mono {
   gap: 6px;
 }
 
+.task-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0;
+}
+
 /* -- gallery ---------------------------------------------------------- */
 
 .gallery-grid {

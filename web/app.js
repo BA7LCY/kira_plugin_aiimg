@@ -42,6 +42,7 @@ const STATUS = {
   queued: ["排队中", "wait"],
   running: ["运行中", "run"],
   succeeded: ["已完成", "ok"],
+  partial: ["部分完成", "wait"],
   failed: ["失败", "fail"],
   cancelled: ["已取消", "off"],
 };
@@ -1114,6 +1115,13 @@ const DELIVERY_LABELS = {
   failed: ["发送失败", "fail"],
 };
 
+const ITEM_STATES = {
+  done: ["完成", "ok"],
+  failed: ["失败", "fail"],
+  running: ["生成中", "run"],
+  queued: ["排队", "wait"],
+};
+
 function deliveryChip(task) {
   const entry = DELIVERY_LABELS[String(task.delivery_state || "")];
   if (!entry) return null;
@@ -1141,6 +1149,8 @@ function taskTable(tasks, withActions) {
   const body = el("tbody", {});
   for (const task of tasks) {
     const canCancel = task.status === "queued" || task.status === "running";
+    const items = Array.isArray(task.items) ? task.items : [];
+    const failedItems = items.filter((item) => item.state === "failed");
     const rowActions = [];
     if (canCancel) {
       rowActions.push(
@@ -1171,6 +1181,22 @@ function taskTable(tasks, withActions) {
         )
       );
     }
+    if (failedItems.length) {
+      rowActions.push(
+        el(
+          "button",
+          {
+            class: "btn small ghost",
+            type: "button",
+            "data-action": "task-retry",
+            "data-task": task.task_id,
+            "data-only-failed": "1",
+          },
+          iconNode("refresh"),
+          "重试失败项"
+        )
+      );
+    }
     body.append(
       el(
         "tr",
@@ -1198,6 +1224,25 @@ function taskTable(tasks, withActions) {
             "td",
             { colspan: withActions ? "8" : "7", class: "mono", style: "color:var(--danger)" },
             task.error
+          )
+        )
+      );
+    }
+    if (items.length) {
+      const chips = items.map((item) => {
+        const [label, tone] = ITEM_STATES[item.state] || [item.state || "未知", "wait"];
+        const chip = el("span", { class: `chip ${tone}` }, `${item.index}. ${label}`);
+        chip.title = `${item.prompt || ""}${item.error_kind ? `（${item.error_kind}）` : ""}`;
+        return chip;
+      });
+      body.append(
+        el(
+          "tr",
+          {},
+          el(
+            "td",
+            { colspan: withActions ? "8" : "7" },
+            el("div", { class: "task-items" }, ...chips)
           )
         )
       );
@@ -3419,7 +3464,7 @@ function onViewClick(event) {
       return;
     }
     if (action === "task-retry") {
-      retryTask(button.dataset.task);
+      retryTask(button.dataset.task, button.dataset.onlyFailed === "1");
       return;
     }
     if (action === "gallery-refresh") {
@@ -3612,12 +3657,12 @@ async function cancelTask(taskId) {
   }
 }
 
-async function retryTask(taskId) {
+async function retryTask(taskId, onlyFailed = false) {
   if (!taskId) return;
   try {
     const data = await api(`/tasks/${encodeURIComponent(taskId)}/retry`, {
       method: "POST",
-      body: JSON.stringify({ task_id: taskId }),
+      body: JSON.stringify({ task_id: taskId, only_failed: onlyFailed }),
     });
     toast(data.ok ? "已重新入队" : data.error || "重试没成功", data.ok ? "info" : "error");
     if (data.ok) {

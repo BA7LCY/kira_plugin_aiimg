@@ -190,17 +190,19 @@ def test_console_only_fields_follow_the_order_of_the_saved_layout():
 def test_prompt_card_groups_moved_and_new_fields():
     keys = list(S.sections()["section_prompts"]["fields"])
 
-    assert keys[:7] == [
+    assert keys[:8] == [
         "selfie_prompt_prefix",
         "selfie_video_frame_template",
         "ack_notification_prompt",
         "result_notification_prompt",
         "draw_presets",
         "edit_presets",
+        "video_presets",
         "presets_prompt",
     ]
-    assert keys[7] == "reference_heading"
-    assert keys[8:] == [
+    assert keys[8] == "inspiration_prompt"
+    assert keys[9] == "reference_heading"
+    assert keys[10:] == [
         "reference_role_persona",
         "reference_role_base",
         "reference_role_subject",

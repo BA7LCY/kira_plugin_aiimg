@@ -134,6 +134,7 @@ def _install_stubs():
     elements_mod.Image = type("Image", (), {"__init__": lambda self, **kw: setattr(self, "kw", kw)})
     def video_init(self, file, name=None, size=None, mime=None):
         self.kw = {"file": file, "name": name, "size": size, "mime": mime}
+        self.file = file
 
     elements_mod.Video = type("Video", (), {"__init__": video_init})
     elements_mod.Text = type(
@@ -517,6 +518,9 @@ class _Registry:
     def validate(self):
         return []
 
+    async def close(self):
+        return None
+
 
 async def test_builtin_media_tags_are_hidden(plugin_module, tmp_path):
     _ref_file(tmp_path / "refs" / "ref.png")
@@ -663,15 +667,19 @@ def test_append_fallback_keeps_order(plugin_module, tmp_path):
 def test_preset_lookup_and_apply(plugin_module, tmp_path):
     config = _config()
     config["section_prompts"]["draw_presets"] = ["手办化:Transform into a figurine", "坏行"]
+    config["section_prompts"]["video_presets"] = ["运镜:慢速推近"]
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
 
     prompt, name = plugin._apply_preset("一只猫", "手办化", "generate")
     unchanged, missing = plugin._apply_preset("一只猫", "没有", "generate")
+    video_prompt, video_name = plugin._apply_preset("一只猫在跑", "运镜", "video")
 
     assert name == "手办化"
     assert prompt.startswith("Transform into a figurine")
     assert unchanged == "一只猫"
     assert missing == ""
+    assert video_name == "运镜"
+    assert video_prompt == "慢速推近 一只猫在跑"
 
 
 def _ref_file(path: Path, data: bytes = b"") -> Path:
@@ -2184,6 +2192,155 @@ async def test_input_image_accepts_a_remembered_ref(plugin_module, tmp_path):
         assert resolved == photo
     finally:
         await plugin.terminate()
+
+
+async def test_batch_items_show_progress_and_can_be_retried(plugin_module, tmp_path):
+    plugin, _ = await _ready_plugin(plugin_module, tmp_path)
+    try:
+        record = plugin._store.create(
+            kind="generate_image_batch",
+            sid="s1",
+            user_id="u1",
+            prompt="两张",
+            provider="p",
+            chain=["p"],
+            extra={"prompts": ["a", "b"]},
+        )
+        plugin._store.seed_items(record.task_id, [(0, "a"), (1, "b")])
+        plugin._store.set_item(record.task_id, 0, "done", image_ref="img-abc123")
+        plugin._store.set_item(record.task_id, 1, "failed", error="上游超时")
+
+        payload = json.loads(plugin._describe_task(record))
+
+        assert payload["progress"] == "1/2"
+        assert [item["state"] for item in payload["items"]] == ["done", "failed"]
+        assert payload["items"][0]["image_ref"] == "img-abc123"
+        assert "error_kind" in payload["items"][1]
+        retry = plugin._retry_record(record, prompts=["b"])
+        assert retry.extra["prompts"] == ["b"]
+    finally:
+        await plugin.terminate()
+
+
+async def test_task_list_includes_batch_item_states(plugin_module, tmp_path):
+    plugin, _ = await _ready_plugin(plugin_module, tmp_path)
+    try:
+        record = plugin._store.create(
+            kind="generate_image_batch",
+            sid="s1",
+            user_id="u1",
+            prompt="两张",
+            provider="p",
+            chain=["p"],
+            extra={"prompts": ["a", "b"]},
+        )
+        plugin._store.seed_items(record.task_id, [(0, "a"), (1, "b")])
+        plugin._store.set_item(record.task_id, 0, "done", image_ref="img-abc123")
+        plugin._store.set_item(record.task_id, 1, "failed", error="上游超时")
+
+        payload = await plugin.api_tasks()
+
+        row = payload["tasks"][0]
+        assert row["progress"] == "1/2"
+        assert [item["state"] for item in row["items"]] == ["done", "failed"]
+    finally:
+        await plugin.terminate()
+
+
+async def test_batch_partial_is_marked_on_the_record(plugin_module, tmp_path):
+    plugin, _ = await _ready_plugin(plugin_module, tmp_path)
+    try:
+        plugin._ready = True
+        record = plugin._store.create(
+            kind="generate_image_batch",
+            sid="s1",
+            user_id="u1",
+            prompt="两张",
+            provider="p",
+            chain=["p"],
+            extra={"prompts": ["a", "b"]},
+        )
+        plugin._store.seed_items(record.task_id, [(0, "a"), (1, "b")])
+        plugin._store.set_item(record.task_id, 0, "done", image_ref="img-abc123")
+        plugin._store.set_item(record.task_id, 1, "failed", error="上游超时")
+        plugin._store.set_result(
+            record.task_id,
+            '{"media": ["x.png"], "refs": ["img-abc123"], "partial_errors": ["2: 上游超时"], "count": 1}',
+            provider="p",
+        )
+
+        async def send_media(*args, **kwargs):
+            return True, 1
+
+        async def publish(*args, **kwargs):
+            return True
+
+        plugin._send_media = send_media
+        plugin._publish_notification = publish
+        await plugin._on_task_finished(plugin._store.get(record.task_id))
+
+        fresh = plugin._store.get(record.task_id)
+        assert fresh.status == "partial"
+    finally:
+        await plugin.terminate()
+
+
+async def test_saved_inspirations_reach_the_model_each_turn(plugin_module, tmp_path):
+    plugin, _ = await _ready_plugin(plugin_module, tmp_path)
+    try:
+        plugin._inspiration.add("雨夜便利店，霓虹倒影", sid="s1")
+        request = types.SimpleNamespace(system_prompt=[])
+
+        await plugin._inject_presets(_memory_event("s1"), request)
+
+        text = "\n".join(prompt.content for prompt in request.system_prompt)
+        assert "雨夜便利店" in text
+        assert "灵感库" in text or plugin._prompts("inspiration_prompt", "")
+    finally:
+        await plugin.terminate()
+
+
+async def test_video_rejects_outside_audio_and_missing_last_frame(plugin_module, tmp_path):
+    plugin, _ = await _ready_plugin(plugin_module, tmp_path)
+    plugin.plugin_cfg["section_features"]["video_enabled"] = True
+    plugin._registry = _Registry(images=("p1",), videos=("p1",))
+    outside = tmp_path / "voice.mp3"
+    outside.write_bytes(b"ID3")
+    event = _memory_event("s1")
+    try:
+        answer = await plugin.generate_video(event, "跑起来", audio=str(outside))
+        assert "音频只能放在插件数据目录" in answer
+
+        answer = await plugin.generate_video(event, "跑起来", last_frame="img-zzzzzz")
+        assert "尾帧图不存在" in answer
+    finally:
+        await plugin.terminate()
+
+
+async def test_video_send_mode_falls_back_to_the_link(plugin_module, tmp_path):
+    plugin, _ = await _ready_plugin(plugin_module, tmp_path)
+    plugin.plugin_cfg["section_advanced"]["video_send_mode"] = "auto"
+    attempts = []
+
+    async def fake_send(sid, chain):
+        value = chain[0].kw["file"]
+        attempts.append(value)
+        return value.startswith("https://")
+
+    plugin._safe_send = fake_send
+    try:
+        ok, count = await plugin._send_media(
+            "s1",
+            [plugin_module.Video(file="C:/missing/v.mp4")],
+            video_url="https://cdn.example/v.mp4",
+            task_id="t1",
+        )
+    finally:
+        await plugin.terminate()
+
+    assert ok is True
+    assert attempts == ["C:/missing/v.mp4", "https://cdn.example/v.mp4"]
+    assert count == 2
 
 
 async def test_input_image_ignores_refs_from_another_session(plugin_module, tmp_path):

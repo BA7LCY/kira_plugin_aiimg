@@ -150,11 +150,23 @@
         "default": "",
         "note": "一行一个，写成「名字:提示词」。用户在改图需求里提到这个名字时，这段提示词会拼在最前面；名字不区分大小写。"
       },
+      "video_presets": {
+        "type": "textarea",
+        "name": "视频预设提示词",
+        "default": "",
+        "note": "一行一个，写成「名字:提示词」。用户在图生视频需求里提到这个名字时，这段提示词会拼在最前面；名字不区分大小写。"
+      },
       "presets_prompt": {
         "type": "textarea",
         "name": "预设说明",
         "default": "画图预设：用户用这些名字描述风格时，把名字填进工具参数 preset。",
         "note": "加在系统提示词里的一句话，用来告诉模型预设怎么用；下面会自动列出预设清单。留空则只列清单、不加说明。"
+      },
+      "inspiration_prompt": {
+        "type": "textarea",
+        "name": "灵感库说明",
+        "default": "灵感库：下面是用户存下来的画面点子，可以挑一个当画图方向。",
+        "note": "加在系统提示词里的一句话，用来告诉模型灵感库是什么；后面会自动列出最近 8 条灵感正文。留空则只列正文、不加说明。"
       },
       "reference_heading": {
         "type": "info",
@@ -452,6 +464,13 @@
         "min": 30,
         "max": 600,
         "note": "发送视频时等待投递结果的最长秒数，超时或连接中断会记为发送结果未知、不自动重发；默认 180 秒。"
+      },
+      "video_send_mode": {
+        "type": "select",
+        "name": "视频发送方式",
+        "default": "auto",
+        "options": ["auto", "file", "url"],
+        "note": "auto 先发本地文件、失败再发服务商链接；file 只发本地文件；url 只发链接。服务商链接有时效，过期就只能发本地文件；默认 auto。"
       },
       "download_timeout_seconds": {
         "type": "integer",
