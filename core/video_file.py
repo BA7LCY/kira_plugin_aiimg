@@ -13,7 +13,7 @@ from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
-from .http import current_session
+from .http import _redirect_headers, current_session
 from .net import URLFetchPolicy, ensure_peer_allowed, ensure_url_allowed, origin
 
 MAX_VIDEO_BYTES = 256 * 1024 * 1024
@@ -124,13 +124,14 @@ async def _resolve_direct_url(
 ) -> str:
     """Follow redirects and unwrap HTML/JSON landing pages down to a media file."""
     current = str(url or "").strip()
+    auth_origin = current
     for _ in range(_MAX_REDIRECTS):
         if _video_url(current):
             return current
         await ensure_url_allowed(current, policy)
         async with session.get(
             current,
-            headers=headers or None,
+            headers=_redirect_headers(auth_origin, current, headers) or None,
             allow_redirects=False,
             timeout=timeout,
         ) as resp:
@@ -286,6 +287,7 @@ async def _download_stream(
 ) -> None:
     """Stream to disk, resuming from whatever bytes survived an interruption."""
     current = url
+    auth_origin = url
     redirects = 0
     for attempt in range(_MAX_ATTEMPTS):
         resume = target.stat().st_size if target.exists() else 0
@@ -297,8 +299,13 @@ async def _download_stream(
         try:
             while True:
                 await ensure_url_allowed(current, policy)
-                async with session.get(current, headers=request_headers or None,
-                                       allow_redirects=False, timeout=timeout) as resp:
+                async with session.get(
+                    current,
+                    headers=_redirect_headers(auth_origin, current, request_headers)
+                    or None,
+                    allow_redirects=False,
+                    timeout=timeout,
+                ) as resp:
                     await ensure_peer_allowed(resp, current, policy)
                     if resp.status in _REDIRECT_STATUSES:
                         redirects += 1

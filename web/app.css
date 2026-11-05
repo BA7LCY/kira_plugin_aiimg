@@ -864,6 +864,12 @@ table.data .mono {
   color: var(--muted);
 }
 
+/* Tables never break the page layout: too narrow and they scroll sideways. */
+.table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
 .chip {
   display: inline-flex;
   align-items: center;
@@ -1673,6 +1679,207 @@ table.data .mono {
   font-weight: 600;
 }
 
+/* -- inspirations ------------------------------------------------------ */
+
+.inspo-list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.inspo-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid var(--line);
+}
+
+.inspo-row:first-child {
+  padding-top: 0;
+  border-top: 0;
+}
+
+.inspo-row:last-child {
+  padding-bottom: 0;
+}
+
+.inspo-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inspo-text {
+  margin: 0;
+  flex: 0 1 auto;
+  min-width: 0;
+  color: var(--ink);
+  font-size: 12.5px;
+  line-height: 1.55;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.inspo-meta {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.inspo-tag {
+  background: var(--canvas);
+  color: var(--muted);
+}
+
+.inspo-stat {
+  color: var(--muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.inspo-del {
+  flex: 0 0 auto;
+  width: 28px;
+  height: 28px;
+  color: var(--muted);
+}
+
+.inspo-del:hover {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.inspo-del:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* -- first paint ------------------------------------------------------ */
+
+/* Bars where the real content will land. Nothing here is clickable and
+   nothing here claims the plugin is broken. */
+.sk-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px;
+}
+
+.sk-line {
+  height: 10px;
+  border-radius: 4px;
+  background: var(--canvas);
+  animation: sk-pulse 1.3s ease-in-out infinite;
+}
+
+.sk-line.w30 {
+  width: 30%;
+}
+
+.sk-line.w40 {
+  width: 40%;
+}
+
+.sk-line.w50 {
+  width: 50%;
+}
+
+.sk-line.w60 {
+  width: 60%;
+}
+
+.sk-line.w70 {
+  width: 70%;
+}
+
+.sk-line.w80 {
+  width: 80%;
+}
+
+.sk-hint {
+  color: var(--muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+@keyframes sk-pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.45;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sk-line {
+    animation: none;
+  }
+}
+
+/* A plugin that only half started says so once, quietly, and can be closed. */
+.startup-banner {
+  display: flex;
+  align-items: flex-start;
+  gap: 9px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  border: 1px solid #ecd9a8;
+  border-radius: 7px;
+  background: var(--warn-soft);
+  color: var(--warn);
+  font-size: 12px;
+}
+
+html[data-theme="dark"] .startup-banner {
+  border-color: #4a3d22;
+}
+
+.startup-banner .icon {
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+}
+
+.startup-text {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 4px;
+  min-width: 0;
+}
+
+.startup-text strong {
+  font-weight: 600;
+}
+
+.startup-detail {
+  flex-basis: 100%;
+  max-height: 96px;
+  overflow: auto;
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.startup-close {
+  width: 26px;
+  height: 26px;
+  margin-left: auto;
+  color: inherit;
+}
+
 /* -- responsive ------------------------------------------------------- */
 
 @media (max-width: 900px) {
@@ -1740,6 +1947,50 @@ table.data .mono {
 
   .chain-row .output {
     grid-column: 2 / 3;
+  }
+
+  /* Phones get two big tiles instead of a six-column strip, and the picture
+     keeps its own shape instead of being cropped to a square. */
+  .gallery-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .tile .shot {
+    aspect-ratio: auto;
+    min-height: 110px;
+  }
+
+  .table-scroll table.data {
+    min-width: 720px;
+  }
+
+  /* Narrow columns: one line per idea, so the tags fold away and the
+     sentence keeps the room; the bin stays on its own edge. */
+  .inspo-row {
+    gap: 8px;
+  }
+
+  .inspo-text {
+    font-size: 12px;
+  }
+
+  .inspo-tag,
+  .inspo-stat {
+    display: none;
+  }
+
+  .inspo-del {
+    width: 32px;
+    height: 32px;
+  }
+}
+
+/* Touch screens have no hover, so the star has to be visible all the time.
+   Desktops keep the quiet version: the star fades in when the tile is hovered. */
+@media (hover: none), (pointer: coarse) {
+  .tile .fav {
+    opacity: 1;
   }
 }
 

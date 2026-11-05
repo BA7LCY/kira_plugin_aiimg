@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import io
 import socket
+import threading
 
 import aiohttp
 import pytest
@@ -20,6 +21,7 @@ from core.http import (
     peek_session,
 )
 from core.net import URLFetchPolicy
+from core.task_store import TaskStore
 
 PRIVATE_IP = "10.1.2.3"
 # 服务端收到的请求记录，用 AppKey 避免 aiohttp 的告警
@@ -45,6 +47,15 @@ def _fake_dns(monkeypatch, address: str) -> None:
 def _policy_for(server: TestServer) -> URLFetchPolicy:
     """把本地测试服务登记成受信任来源，其它地址仍按默认策略拒绝。"""
     return URLFetchPolicy(trusted_origins=frozenset({f"http://127.0.0.1:{server.port}"}))
+
+
+def _policy_for_both(*servers: TestServer) -> URLFetchPolicy:
+    """把多个本地服务都登记成受信任来源，供跨 origin 跳转的用例使用。"""
+    return URLFetchPolicy(
+        trusted_origins=frozenset(
+            f"http://127.0.0.1:{server.port}" for server in servers
+        )
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -345,3 +356,179 @@ async def test_下载图片复用共享会话(demo_server):
     assert session is not None
     assert await client.request_json("GET", base + "ok") == {"ok": True, "path": "/ok"}
     assert peek_session() is session
+
+
+# -- 跨 origin 重定向的凭据处理 -------------------------------------------
+#
+# 用两个不同端口的本地服务模拟「一个主机把请求跳到另一个主机」。
+# 两个 origin 都登记成受信任来源，地址校验因此不会拦住第二跳，
+# 这样才能单独观察 Authorization 等凭据头有没有被带过去。
+
+def _credential_report(request: web.Request) -> dict:
+    """把服务端实际收到的凭据头原样回显，便于断言。"""
+    return {
+        "authorization": request.headers.get("Authorization", ""),
+        "proxy_authorization": request.headers.get("Proxy-Authorization", ""),
+        "cookie": request.headers.get("Cookie", ""),
+        "trace": request.headers.get("X-Trace", ""),
+        "path": request.path,
+    }
+
+
+@pytest.fixture()
+async def redirect_pair():
+    """source 服务按 ?to= 跳转，target 服务回显收到的请求头。"""
+    seen: list[dict] = []
+
+    async def inspect(request: web.Request) -> web.Response:
+        report = _credential_report(request)
+        seen.append(report)
+        return web.json_response(report)
+
+    async def hop(request: web.Request) -> web.Response:
+        raise web.HTTPFound(request.query.get("to") or "/inspect")
+
+    async def hop_image(request: web.Request) -> web.Response:
+        raise web.HTTPFound(request.query.get("to") or "/image")
+
+    async def image(request: web.Request) -> web.Response:
+        seen.append(_credential_report(request))
+        return web.Response(body=_png(), content_type="image/png")
+
+    source_app = web.Application()
+    source_app.router.add_get("/hop", hop)
+    source_app.router.add_get("/hop-image", hop_image)
+    source_app.router.add_get("/inspect", inspect)
+    source_app.router.add_get("/image", image)
+
+    target_app = web.Application()
+    target_app.router.add_get("/inspect", inspect)
+    target_app.router.add_get("/image", image)
+
+    source = TestServer(source_app)
+    await source.start_server()
+    target = TestServer(target_app)
+    await target.start_server()
+    try:
+        yield source, target, seen
+    finally:
+        await target.close()
+        await source.close()
+
+
+def _credential_headers() -> dict[str, str]:
+    return {
+        "Authorization": "Bearer sk-secret-123456",
+        "Proxy-Authorization": "Basic cHJveHk=",
+        "Cookie": "sid=abc",
+        "X-Trace": "trace-1",
+    }
+
+
+@pytest.mark.asyncio
+async def test_同源重定向保留凭据头(redirect_pair):
+    """跳转目标与原始地址同 origin 时，凭据头必须照旧带上。"""
+    source, _target, _seen = redirect_pair
+    client = ProviderHTTP(policy=_policy_for(source))
+    result = await client.request_json(
+        "GET", _base(source) + "hop?to=/inspect", headers=_credential_headers()
+    )
+    assert result["path"] == "/inspect"
+    assert result["authorization"] == "Bearer sk-secret-123456"
+    assert result["proxy_authorization"] == "Basic cHJveHk="
+    assert result["cookie"] == "sid=abc"
+    assert result["trace"] == "trace-1"
+
+
+@pytest.mark.asyncio
+async def test_跨域重定向剥掉凭据头(redirect_pair):
+    """跳到另一个 origin 时，三个凭据头都必须被剥掉，普通头照常保留。"""
+    source, target, _seen = redirect_pair
+    client = ProviderHTTP(policy=_policy_for_both(source, target))
+    to = str(target.make_url("/inspect"))
+    result = await client.request_json(
+        "GET", f"{_base(source)}hop?to={to}", headers=_credential_headers()
+    )
+    assert result["path"] == "/inspect"
+    assert result["authorization"] == ""
+    assert result["proxy_authorization"] == ""
+    assert result["cookie"] == ""
+    assert result["trace"] == "trace-1"
+
+
+@pytest.mark.asyncio
+async def test_图片下载跨域重定向也剥掉凭据头(redirect_pair):
+    """下载路径同样逐跳重算请求头，跨域时不能把凭据带过去。"""
+    source, target, seen = redirect_pair
+    client = ProviderHTTP(policy=_policy_for_both(source, target))
+    to = str(target.make_url("/image"))
+    data = await client.download_image(
+        f"{_base(source)}hop-image?to={to}",
+        follow_redirects=True,
+        headers=_credential_headers(),
+    )
+    assert data == _png()
+    last = seen[-1]
+    assert last["path"] == "/image"
+    assert last["authorization"] == ""
+    assert last["proxy_authorization"] == ""
+    assert last["cookie"] == ""
+    assert last["trace"] == "trace-1"
+
+
+# -- 任务库跨线程回归 -----------------------------------------------------
+#
+# 后台清理由 main.py 通过 asyncio.to_thread 调度，会在另一个线程里用同一个
+# sqlite 连接，所以连接要允许跨线程、写操作要串行化。测试改动范围只放开
+# 本文件与 test_net_policy.py，任务库的这两条回归用例因此放在这里。
+
+
+@pytest.mark.asyncio
+async def test_任务库能在后台线程里执行清理(tmp_path):
+    """to_thread 里调用 prune_old 不能因为线程检查而失败。"""
+    store = TaskStore(tmp_path)
+    try:
+        record = store.create(kind="image", user_id="u1")
+        store.set_result(record.task_id, "ok")
+        # 直接把完成时间改到很久以前，避免用例依赖真实时间流逝
+        store._db.execute(
+            "UPDATE tasks SET finished_at = 1 WHERE task_id = ?", (record.task_id,)
+        )
+        removed = await asyncio.to_thread(store.prune_old, 1)
+        assert removed == 1
+        assert store.get(record.task_id) is None
+    finally:
+        store.close()
+
+
+def test_任务库支持多线程并发写(tmp_path):
+    """多个线程同时经同一个连接写库时，不能丢记录也不能抛异常。"""
+    store = TaskStore(tmp_path)
+    created: list[str] = []
+    failures: list[BaseException] = []
+
+    def worker(index: int) -> None:
+        try:
+            record = store.create(kind="image", user_id=f"u{index}")
+            created.append(record.task_id)
+            store.set_status(record.task_id, "running")
+            store.set_result(record.task_id, "ok")
+        except BaseException as exc:  # noqa: BLE001 - 收集到主线程统一断言
+            failures.append(exc)
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(8)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert not failures, failures
+        assert len(created) == 8
+        assert len(set(created)) == 8
+        assert store.count_active() == 0
+        for task_id in created:
+            record = store.get(task_id)
+            assert record is not None
+            assert record.status == "succeeded"
+    finally:
+        store.close()

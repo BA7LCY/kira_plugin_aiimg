@@ -145,5 +145,29 @@ async def test_peer_check_respects_the_private_result_switch():
 
 
 @pytest.mark.asyncio
-async def test_peer_check_skips_unknown_peers():
-    await ensure_peer_allowed(_Response(None), "https://cdn.example.com/a", URLFetchPolicy())
+async def test_peer_check_rejects_unknown_peers():
+    """拿不到对端地址时不再放行：放行就等于复核形同虚设。"""
+    with pytest.raises(ValueError, match="无法确认"):
+        await ensure_peer_allowed(
+            _Response(None), "https://cdn.example.com/a.png", URLFetchPolicy()
+        )
+
+
+@pytest.mark.asyncio
+async def test_peer_check_rejects_unparsable_peer():
+    """有对端地址但解析不出 IP，同样属于无法确认，按拒绝处理。"""
+    with pytest.raises(ValueError, match="无法确认"):
+        await ensure_peer_allowed(
+            _Response(("not-an-ip", 443)),
+            "https://cdn.example.com/a.png",
+            URLFetchPolicy(),
+        )
+
+
+@pytest.mark.asyncio
+async def test_peer_check_still_trusts_allowlisted_origin():
+    """白名单里的 origin 不看对端地址，照旧直接放行。"""
+    policy = URLFetchPolicy(trusted_origins=frozenset({"https://cdn.example.com"}))
+    await ensure_peer_allowed(
+        _Response(None), "https://cdn.example.com/a.png", policy
+    )

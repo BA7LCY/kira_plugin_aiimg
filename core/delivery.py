@@ -71,13 +71,24 @@ def route_summary(elements: list[Any]) -> str:
     return "、".join(f"{name} {count} 个" for name, count in counts.items()) or "空"
 
 
-async def _send_once(sender: Callable[[str, Any], Any], sid: str, chain: Any) -> tuple[bool, str, bool]:
+async def _send_once(
+    sender: Callable[[str, Any], Any],
+    sid: str,
+    chain: Any,
+    timeout: float = 0.0,
+) -> tuple[bool, str, bool]:
     """发一次，返回（是否成功, 失败原因, 是否抛了异常）。
 
     适配器有的返回失败对象、有的直接抛错，这里统一成一种形状，调用方只管重试。
+    给了超时就用它兜住整个发送，避免一次卡住的请求把任务永远挂在那里。
     """
     try:
-        result = await sender(sid, chain)
+        if timeout > 0:
+            result = await asyncio.wait_for(sender(sid, chain), timeout=timeout)
+        else:
+            result = await sender(sid, chain)
+    except asyncio.TimeoutError:
+        return False, f"发送超时（{int(timeout)} 秒）", True
     except Exception as exc:
         return False, f"{type(exc).__name__}: {exc}", True
     if getattr(result, "ok", True):
@@ -95,6 +106,7 @@ async def deliver_chain(
     attempts: int = 3,
     base_delay: float = 1.0,
     split_media: bool = True,
+    timeout_seconds: float = 0.0,
 ) -> DeliveryResult:
     """先整条重试，实在不行再逐段发送。
 
@@ -114,7 +126,7 @@ async def deliver_chain(
     )
     started = time.monotonic()
     for attempt in range(1, total + 1):
-        ok, error, raised = await _send_once(sender, sid, chain)
+        ok, error, raised = await _send_once(sender, sid, chain, timeout_seconds)
         if ok:
             logger.info(
                 "[aiimg] 投递成功：第 %d/%d 轮，走%s，用时 %d 毫秒",
@@ -152,7 +164,7 @@ async def deliver_chain(
         element_route = payload_route(element)
         element_error = ""
         for attempt in range(1, total + 1):
-            ok, error, _raised = await _send_once(sender, sid, piece)
+            ok, error, _raised = await _send_once(sender, sid, piece, timeout_seconds)
             if ok:
                 sent_any = True
                 sent_ok += 1

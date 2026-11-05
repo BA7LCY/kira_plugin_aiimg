@@ -300,18 +300,21 @@ def test_valid_image_is_decodable(plugin_module):
     assert not plugin_module._looks_like_image(_png()[:40])
 
 
-def test_gallery_failure_is_not_also_a_success(plugin_module, tmp_path):
-    plugin = _prepare(plugin_module, tmp_path, {"p1": _Backend()})
+def test_gallery_failure_keeps_the_image_without_regenerating(plugin_module, tmp_path):
+    backend = _Backend()
+    plugin = _prepare(plugin_module, tmp_path, {"p1": backend})
 
     async def fail_save(*args, **kwargs):
         raise OSError("disk full")
 
     plugin._gallery.save_image = fail_save
-    with pytest.raises(RuntimeError, match="disk full"):
-        asyncio.run(plugin._run_image_chain(_record(["p1"]), kind="generate"))
+    result = asyncio.run(plugin._run_image_chain(_record(["p1"]), kind="generate"))
+    # 图到手就算成功：不再换服务商重新生成，图落到临时目录继续发。
+    assert backend.calls == 1
+    assert len(result["media"]) == 1
+    assert (tmp_path / "recovered").exists()
     row = plugin._stats.snapshot()[0]
-    assert (row["attempts"], row["successes"], row["failures"]) == (1, 0, 1)
-    assert plugin._consecutive_failures("p1") == 1
+    assert (row["attempts"], row["successes"], row["failures"]) == (1, 1, 0)
 
 
 @pytest.mark.parametrize("download_ok", [True, False])

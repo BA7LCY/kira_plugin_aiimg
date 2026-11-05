@@ -87,6 +87,13 @@ const state = {
   saving: false,
   polling: 0,
   loadError: "",
+  // Read-only list on the settings page. It is fetched once per visit, kept
+  // here so the card can redraw itself without asking again.
+  inspirations: { items: [], total: 0, loaded: false, loading: false, error: "" },
+  // True until the very first load() settles: while it is on, a missing
+  // config means "still reading", not "reading failed".
+  booting: true,
+  startupDismissed: "",
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -366,32 +373,65 @@ function renderNotes() {
   box.classList.toggle("hidden", notes.length === 0);
 }
 
+// A plugin that failed to start still serves the page, it just cannot do part
+// of its job. That is said once at the top of the page, in a line the reader
+// can close, not as a wall that replaces the whole screen.
+function renderStartupBanner() {
+  const main = $(".main");
+  if (!main) return;
+  const text = String(state.status?.startup_error || "").trim();
+  let box = $("#startup-banner");
+  if (!text || text === state.startupDismissed) {
+    if (box) box.remove();
+    return;
+  }
+  if (!box) {
+    box = el("div", { id: "startup-banner", class: "startup-banner", role: "status" });
+    box.addEventListener("click", (event) => {
+      if (!event.target.closest("[data-action='startup-dismiss']")) return;
+      state.startupDismissed = box.dataset.text || "";
+      box.remove();
+    });
+    main.prepend(box);
+  }
+  // The text is the whole content, so an unchanged message needs no repaint.
+  if (box.dataset.text === text) return;
+  box.dataset.text = text;
+  box.replaceChildren(
+    iconNode("alert"),
+    el(
+      "div",
+      { class: "startup-text" },
+      el("strong", {}, "插件启动时出错了，部分功能不可用："),
+      el("span", { class: "startup-detail" }, text)
+    ),
+    el(
+      "button",
+      {
+        class: "icon-btn startup-close",
+        type: "button",
+        title: "关闭提醒",
+        "data-action": "startup-dismiss",
+      },
+      iconNode("close")
+    )
+  );
+}
+
 function render() {
   renderNav();
   updateTopbar();
   renderNotes();
+  renderStartupBanner();
   const view = $("#view");
   view.replaceChildren();
   stopPolling();
   releaseBlobs();
   if (!state.config) {
-    view.append(
-      el(
-        "div",
-        { class: "card" },
-        el(
-          "div",
-          { class: "blank" },
-          iconNode("alert"),
-          el("strong", {}, "配置没有加载出来"),
-          el(
-            "p",
-            {},
-            state.loadError || "点右上角刷新重试"
-          )
-        )
-      )
-    );
+    // An empty config is only an error once the first load has really failed.
+    // Before that the page is just waiting, so it paints a quiet skeleton.
+    if (state.booting) renderSkeleton(view);
+    else renderLoadError(view);
     return;
   }
   const renderer = {
@@ -406,6 +446,49 @@ function render() {
 }
 
 function releaseBlobs() {
+}
+
+// First paint: card-shaped bars in the place the real page will take. It never
+// claims anything, so a slow plugin reads as "loading", not as "broken".
+function renderSkeleton(root) {
+  const head = el(
+    "div",
+    { class: "card sk-card" },
+    el("div", { class: "sk-line w30" }),
+    el("div", { class: "sk-line w60" }),
+    el("div", { class: "sk-line w80" })
+  );
+  const stats = el("div", { class: "grid-stats" });
+  for (let index = 0; index < 3; index += 1) {
+    stats.append(
+      el(
+        "div",
+        { class: "card sk-card" },
+        el("div", { class: "sk-line w40" }),
+        el("div", { class: "sk-line w70" }),
+        el("div", { class: "sk-line w50" })
+      )
+    );
+  }
+  root.append(stats, head);
+  root.append(el("p", { class: "sk-hint", role: "status" }, "正在读取配置…"));
+}
+
+function renderLoadError(root) {
+  root.append(
+    el(
+      "div",
+      { class: "card" },
+      el(
+        "div",
+        { class: "blank" },
+        iconNode("alert"),
+        el("strong", {}, "配置没有加载出来"),
+        el("p", {}, state.loadError || "网络或插件没回应，稍等一下再试。"),
+        el("button", { class: "btn small", type: "button", "data-action": "boot-retry" }, "再试一次")
+      )
+    )
+  );
 }
 
 // -- overview ---------------------------------------------------------
@@ -1024,6 +1107,22 @@ function duration(task) {
   return seconds >= 60 ? `${Math.floor(seconds / 60)}分${seconds % 60}秒` : `${seconds}秒`;
 }
 
+// Delivery is read-only here: the task table reports what happened on the way
+// out, it never offers to send again (the model has its own resend tool).
+const DELIVERY_LABELS = {
+  delivered: ["已送达", "ok"],
+  failed: ["发送失败", "fail"],
+};
+
+function deliveryChip(task) {
+  const entry = DELIVERY_LABELS[String(task.delivery_state || "")];
+  if (!entry) return null;
+  const chip = el("span", { class: `chip ${entry[1]}` }, entry[0]);
+  const attempts = Number(task.delivery_attempts || 0);
+  if (attempts > 0) chip.title = `投递尝试 ${attempts} 次`;
+  return chip;
+}
+
 function taskTable(tasks, withActions) {
   const table = el("table", { class: "data" });
   const head = el(
@@ -1031,6 +1130,7 @@ function taskTable(tasks, withActions) {
     {},
     el("th", {}, "功能"),
     el("th", {}, "状态"),
+    el("th", {}, "投递"),
     el("th", {}, "服务商"),
     el("th", {}, "提示词"),
     el("th", {}, "创建"),
@@ -1077,6 +1177,7 @@ function taskTable(tasks, withActions) {
         {},
         el("td", {}, KIND_LABELS[task.kind] || task.kind || "-"),
         el("td", {}, statusChip(task.status)),
+        el("td", {}, deliveryChip(task)),
         el("td", { class: "mono" }, task.provider || "-"),
         el(
           "td",
@@ -1095,7 +1196,7 @@ function taskTable(tasks, withActions) {
           {},
           el(
             "td",
-            { colspan: withActions ? "7" : "6", class: "mono", style: "color:var(--danger)" },
+            { colspan: withActions ? "8" : "7", class: "mono", style: "color:var(--danger)" },
             task.error
           )
         )
@@ -1103,7 +1204,9 @@ function taskTable(tasks, withActions) {
     }
   }
   table.append(body);
-  return table;
+  // Narrow screens scroll the table sideways rather than squeezing every
+  // column into an unreadable strip.
+  return el("div", { class: "table-scroll" }, table);
 }
 
 function renderTasks(root) {
@@ -1155,6 +1258,9 @@ function renderTasks(root) {
 async function loadTasks() {
   const holder = $("#task-holder");
   if (!holder) return;
+  // Polling rebuilds this table every few seconds. On a phone the sideways
+  // position is part of what the reader is looking at, so it is put back.
+  const keptScroll = holder.querySelector(".table-scroll")?.scrollLeft || 0;
   const params = new URLSearchParams({ limit: "100" });
   if (state.taskState) params.set("state", state.taskState);
   try {
@@ -1170,6 +1276,8 @@ async function loadTasks() {
       return;
     }
     holder.append(taskTable(state.tasks, true));
+    const box = holder.querySelector(".table-scroll");
+    if (box) box.scrollLeft = keptScroll;
   } catch (error) {
     holder.replaceChildren(el("div", { class: "empty" }, String(error.message || error)));
   }
@@ -1197,6 +1305,7 @@ async function refreshStatus() {
     state.status = data;
     await loadMetrics();
     renderNav();
+    renderStartupBanner();
     if (state.view === "overview") {
       const tasks = await api("/tasks?limit=6").catch(() => null);
       const box = $("#overview-tasks");
@@ -2696,7 +2805,8 @@ function sectionInput(sectionKey, field, item, value) {
   if (sectionKey === "section_features" && field === "selfie_reference_files") {
     return referenceFilesField(item, value);
   }
-  if (sectionKey === "section_features" && (field === "draw_presets" || field === "edit_presets")) {
+  if ((sectionKey === "section_features" || sectionKey === "section_prompts") &&
+      (field === "draw_presets" || field === "edit_presets")) {
     return presetField(sectionKey, field, item, value);
   }
   // 视频白名单和别处的白名单共用同一个列表编辑器。
@@ -2870,10 +2980,168 @@ function renderSettings(root) {
         continue;
       }
       form.append(sectionInput(sectionKey, field, item, values[field]));
+      if (sectionKey === "section_prompts" && field === "presets_prompt") {
+        form.append(inspirationBlock());
+      }
     }
     body.append(form);
     card.append(body);
     root.append(card);
+  }
+  // One request per visit, not a timer: the list only changes when the chat
+  // stores or the reader deletes something.
+  ensureInspirations();
+}
+
+// -- inspirations: read-only list -------------------------------------
+
+const INSPIRATION_EMPTY =
+  "还没有存过灵感。聊天里让模型用 save_inspiration 存一条，这里就能看到。";
+
+function inspirationCount() {
+  return `共 ${Number(state.inspirations.total || 0)} 条`;
+}
+
+function monthDay(seconds) {
+  const value = Number(seconds || 0);
+  if (!value) return "";
+  const time = new Date(value * 1000);
+  if (Number.isNaN(time.getTime())) return "";
+  return `${time.getMonth() + 1}月${time.getDate()}日`;
+}
+
+function inspirationBlock() {
+  const body = el("div", { class: "card-body", id: "inspirations-body" });
+  const wrap = el(
+    "div",
+    { class: "field wide" },
+    el(
+      "div",
+      { class: "field-head" },
+      el("label", {}, "灵感库"),
+      el("span", { class: "sub", id: "inspirations-count" }, inspirationCount())
+    ),
+    body
+  );
+  fillInspirations(body);
+  return wrap;
+}
+
+function inspirationRow(item) {
+  const meta = el("div", { class: "inspo-meta" });
+  for (const tag of Array.isArray(item.tags) ? item.tags : []) {
+    if (!tag) continue;
+    meta.append(el("span", { class: "chip inspo-tag" }, tag));
+  }
+  const uses = Number(item.uses || 0);
+  meta.append(el("span", { class: "inspo-stat" }, uses > 0 ? `用过 ${uses} 次` : "没用过"));
+  const day = monthDay(item.created_at);
+  if (day) meta.append(el("span", { class: "inspo-stat" }, day));
+  const text = String(item.text || "");
+  return el(
+    "li",
+    { class: "inspo-row", "data-inspiration": String(item.id ?? "") },
+    el(
+      "div",
+      { class: "inspo-main" },
+      el("p", { class: "inspo-text", title: text }, text || "（这条没有正文）"),
+      meta
+    ),
+    el(
+      "button",
+      {
+        class: "btn ghost icon-btn inspo-del",
+        type: "button",
+        "data-action": "inspiration-delete",
+        "data-id": String(item.id ?? ""),
+        title: "删除这条灵感",
+        "aria-label": "删除这条灵感",
+      },
+      iconNode("trash")
+    )
+  );
+}
+
+function updateInspirationCount() {
+  const count = $("#inspirations-count");
+  if (count) count.textContent = inspirationCount();
+}
+
+function fillInspirations(box) {
+  const body = box || $("#inspirations-body");
+  if (!body) return;
+  updateInspirationCount();
+  const data = state.inspirations;
+  body.replaceChildren();
+  if (!data.items.length && data.loading) {
+    body.append(el("p", { class: "empty" }, "正在读取灵感…"));
+    return;
+  }
+  if (!data.items.length && data.error) {
+    body.append(el("p", { class: "empty" }, `读取灵感失败：${data.error}`));
+    return;
+  }
+  if (!data.items.length) {
+    body.append(el("p", { class: "empty" }, INSPIRATION_EMPTY));
+    return;
+  }
+  const list = el("ul", { class: "inspo-list" });
+  for (const item of data.items) list.append(inspirationRow(item));
+  body.append(list);
+}
+
+function ensureInspirations() {
+  const data = state.inspirations;
+  if (data.loaded || data.loading) return;
+  loadInspirations();
+}
+
+async function loadInspirations() {
+  const data = state.inspirations;
+  data.loading = true;
+  fillInspirations();
+  try {
+    const answer = await api("/inspirations");
+    const items = Array.isArray(answer.items) ? answer.items : [];
+    // The endpoint may answer 200 with an `error` field instead of a status
+    // code; an empty list is not worth showing as "no ideas yet" when it is
+    // really a read failure.
+    if (answer.error && !items.length) throw new Error(String(answer.error));
+    data.items = items;
+    data.total = Number.isFinite(Number(answer.total)) ? Number(answer.total) : data.items.length;
+    data.error = "";
+  } catch (error) {
+    data.error = String(error.message || error);
+    data.total = data.items.length;
+  } finally {
+    data.loading = false;
+    // Whatever happened, the card is the only thing that changes: the rest of
+    // the form keeps its focus and its scroll.
+    data.loaded = true;
+    fillInspirations();
+  }
+}
+
+async function deleteInspiration(button) {
+  const id = button?.dataset?.id;
+  if (!id || button.disabled) return;
+  const row = button.closest(".inspo-row");
+  button.disabled = true;
+  try {
+    const answer = await api("/inspirations/delete", {
+      method: "POST",
+      body: JSON.stringify({ id }),
+    });
+    if (answer && answer.ok === false) throw new Error(answer.error || "删除没成功");
+    const data = state.inspirations;
+    data.items = data.items.filter((item) => String(item.id) !== String(id));
+    data.total = Math.max(0, Number(data.total || 1) - 1);
+    if (row) row.remove();
+    updateInspirationCount();
+    if (!data.items.length) fillInspirations();
+  } catch (error) {
+    button.disabled = false;
+    toast(String(error.message || error), "error");
   }
 }
 
@@ -2951,6 +3219,10 @@ function onViewClick(event) {
     if (action === "provider-tab") {
       state.providerTab = button.dataset.tab;
       render();
+      return;
+    }
+    if (action === "boot-retry") {
+      boot();
       return;
     }
     if (action === "provider-add") {
@@ -3055,6 +3327,10 @@ function onViewClick(event) {
     }
     if (action === "presets-edit") {
       openPresetEditor(button.dataset.section, button.dataset.sectionField);
+      return;
+    }
+    if (action === "inspiration-delete") {
+      deleteInspiration(button);
       return;
     }
     if (action === "gallery-delete" || action === "image-delete") {
@@ -3200,8 +3476,13 @@ function readControl(control, kind) {
 
 function closeModal() {
   const modal = $("#modal");
+  const dismiss = modalDismiss;
+  modalDismiss = null;
   modal.classList.add("hidden");
   modal.replaceChildren();
+  // A dialog closed from the outside still has to give its caller an answer,
+  // otherwise whoever awaited it waits forever.
+  if (dismiss) dismiss();
 }
 
 async function cancelTask(taskId) {
@@ -3336,52 +3617,74 @@ function applyTheme(theme) {
 }
 
 let navBusy = false;
+// Set while a dialog is waiting for an answer. Any way of closing the modal
+// (Esc, the X, a click on the backdrop) runs it, so the caller never hangs.
+let modalDismiss = null;
+
+function viewFromHash() {
+  const name = (location.hash || "").replace("#", "");
+  return VIEWS[name] ? name : "overview";
+}
+
+// One gate for everything that would drop unsaved edits: saving or discarding
+// happens here, and "stay" means the caller must not continue.
+async function leaveGuard() {
+  if (!dirty()) return true;
+  navBusy = true;
+  try {
+    const choice = await askUnsaved();
+    if (choice === "stay") return false;
+    if (choice === "save") return await save(false);
+    state.config = structuredClone(state.original);
+    return true;
+  } finally {
+    navBusy = false;
+  }
+}
 
 async function route() {
-  const view = (location.hash || "").replace("#", "");
-  const next = VIEWS[view] ? view : "overview";
+  const next = viewFromHash();
   if (next === state.view) {
     render();
     return;
   }
   if (navBusy) return;
-  if (dirty()) {
-    navBusy = true;
-    const choice = await askUnsaved();
-    navBusy = false;
-    if (choice === "stay") {
-      if (state.view) location.hash = `#${state.view}`;
-      return;
-    }
-    if (choice === "save") {
-      const ok = await save(false);
-      if (!ok) {
-        if (state.view) location.hash = `#${state.view}`;
-        return;
-      }
-    }
-    if (choice === "discard") {
-      state.config = structuredClone(state.original);
-    }
+  if (!(await leaveGuard())) {
+    if (state.view) location.hash = `#${state.view}`;
+    return;
+  }
+  if (state.view === "settings" && next !== "settings") {
+    // Next visit reads the list again; until then the old copy is not reused.
+    state.inspirations.loaded = false;
   }
   state.view = next;
   render();
+  // A second click during the dialog changes the hash but not the view; putting
+  // the hash back keeps the address bar and the page telling the same story.
+  if (location.hash !== `#${next}`) location.hash = `#${next}`;
 }
 
 function askUnsaved() {
   return new Promise((resolve) => {
     const modal = $("#modal");
     modal.replaceChildren();
+    let settled = false;
     const finish = (choice) => {
+      if (settled) return;
+      settled = true;
+      modalDismiss = null;
       closeModal();
       resolve(choice);
     };
+    // Esc, the X and the backdrop all mean "cancel": nothing is lost and the
+    // navigation that opened this dialog simply does not happen.
+    modalDismiss = () => finish("stay");
     const card = el("div", { class: "modal-card unsaved-card" });
     card.append(
       el(
         "div",
         { class: "modal-head" },
-        el("h3", { class: "modal-title" }, "未保存的更改"),
+        el("h3", { class: "modal-title" }, "还没保存"),
         el("span", { class: "spacer" }),
         el(
           "button",
@@ -3389,16 +3692,17 @@ function askUnsaved() {
           iconNode("close")
         )
       ),
-      el("p", { class: "modal-text" }, "当前配置有未保存的更改，切换前是否保存？"),
+      el("p", { class: "modal-text" }, "当前页面有还没保存的修改，要先保存吗？"),
       el(
         "div",
         { class: "modal-actions" },
         el(
           "button",
           { class: "btn ghost", type: "button", "data-unsaved": "discard" },
-          "取消"
+          "不保存"
         ),
-        el("button", { class: "btn primary", type: "button", "data-unsaved": "save" }, "确定")
+        el("button", { class: "btn ghost", type: "button", "data-unsaved": "stay" }, "取消"),
+        el("button", { class: "btn primary", type: "button", "data-unsaved": "save" }, "保存")
       )
     );
     card.addEventListener("click", (event) => {
@@ -3425,7 +3729,11 @@ function bind() {
     state.config = structuredClone(state.original);
     render();
   });
-  $("#btn-refresh").addEventListener("click", () => {
+  $("#btn-refresh").addEventListener("click", async () => {
+    // Reloading also drops whatever is only in the form, so it goes through
+    // the same save-or-not question as leaving the page.
+    if (navBusy) return;
+    if (!(await leaveGuard())) return;
     load().catch((error) => toast(String(error.message || error), "error"));
   });
   $("#theme-toggle").addEventListener("click", () => {
@@ -3458,29 +3766,57 @@ function bind() {
     }
   });
   document.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") closeModal();
+    if (event.key !== "Escape") return;
+    const modal = $("#modal");
+    if (!modal || modal.classList.contains("hidden")) return;
+    event.preventDefault();
+    // Closing this way answers a pending dialog too, so navBusy is released.
+    closeModal();
+  });
+  window.addEventListener("beforeunload", (event) => {
+    if (!dirty()) return;
+    event.preventDefault();
+    // Older browsers still need a value here to show their own wording.
+    event.returnValue = "";
   });
   window.addEventListener("hashchange", route);
 }
 
 applyTheme(localStorage.getItem(THEME_KEY) === "dark" ? "dark" : "light");
 bind();
-route();
-start();
+boot();
+
+// The first screen must not accuse the plugin before it has had a chance to
+// answer: the hash picks the view, a skeleton fills the page, and only a load
+// that still fails after one quiet retry becomes the error card.
+async function boot() {
+  state.booting = true;
+  state.view = viewFromHash();
+  render();
+  const ok = await start();
+  state.booting = false;
+  if (ok) {
+    route();
+    return;
+  }
+  render();
+  toast(state.loadError, "error");
+}
 
 async function start() {
   try {
     await load();
+    return true;
   } catch (error) {
     // A restarted framework or plugin can miss the first request; retry once quietly.
     await new Promise((resolve) => setTimeout(resolve, 900));
     try {
       await load();
+      return true;
     } catch (retryError) {
       state.config = null;
       state.loadError = String(retryError.message || retryError);
-      render();
-      toast(state.loadError, "error");
+      return false;
     }
   }
 }

@@ -3,6 +3,7 @@
 from core.prompt import (
     REFERENCE_NOTE_FOOTER,
     REFERENCE_NOTE_HEADER,
+    REFERENCE_ROLE_PROMPTS,
     apply_prefix,
     compose_prompt,
     reference_note,
@@ -105,6 +106,20 @@ def test_reference_note_numbers_each_role():
     assert lines[-1] == REFERENCE_NOTE_FOOTER
 
 
+def test_reference_role_prompts_include_objects():
+    assert "对象参考" in REFERENCE_ROLE_PROMPTS["object"]
+    assert set(REFERENCE_ROLE_PROMPTS) >= {
+        "persona",
+        "base",
+        "subject",
+        "object",
+        "clothing",
+        "style",
+        "pose",
+        "background",
+    }
+
+
 def test_reference_note_unknown_role_falls_back_to_subject():
     note = reference_note(["persona", "face"])
 
@@ -116,3 +131,88 @@ def test_reference_note_mentions_the_edited_original():
 
     assert "参考图 1：待修改的原图，只改用户明确要求的部分" in note
     assert "参考图 2：姿势参考，只取动作和构图" in note
+
+
+def test_reference_note_accepts_configured_role_labels():
+    note = reference_note(
+        ["persona", "clothing"],
+        labels={"clothing": "衣服参考"},
+        settings={"reference_role_persona": "同一个人"},
+    )
+
+    assert "参考图 1：同一个人" in note
+    assert "参考图 2：衣服参考" in note
+
+
+def test_reference_note_blank_role_adds_no_line():
+    note = reference_note(
+        ["persona", "clothing"],
+        header="",
+        footer="",
+        settings={"reference_role_clothing": "   "},
+    )
+
+    assert note.splitlines() == ["参考图 1：固定人物身份，脸和身份保持一致"]
+
+
+def test_reference_note_blank_subject_leaves_unknown_role_silent():
+    note = reference_note(
+        ["persona", "face"],
+        header="",
+        footer="",
+        settings={"reference_role_subject": ""},
+    )
+
+    assert note.splitlines() == ["参考图 1：固定人物身份，脸和身份保持一致"]
+
+
+def test_reference_note_blank_label_argument_is_suppressed():
+    note = reference_note(
+        ["persona", "clothing"],
+        header="",
+        footer="",
+        labels={"clothing": ""},
+    )
+
+    assert note.splitlines() == ["参考图 1：固定人物身份，脸和身份保持一致"]
+
+
+def test_reference_note_reads_a_settings_section():
+    note = reference_note(
+        ["persona", "style"],
+        settings={
+            "reference_role_persona": "同一个人",
+            "reference_note_header": "图说明：",
+            "reference_note_footer": "只看图。",
+        },
+    )
+
+    assert note.splitlines() == [
+        "图说明：",
+        "参考图 1：同一个人",
+        "参考图 2：画风参考，只取画风和色调",
+        "只看图。",
+    ]
+
+
+def test_reference_note_unwraps_the_whole_plugin_config():
+    note = reference_note(
+        ["persona", "pose"],
+        settings={"section_prompts": {"reference_role_pose": "动作参考"}},
+    )
+
+    assert "参考图 2：动作参考" in note
+
+
+def test_reference_note_blank_header_and_footer_are_suppressed():
+    note = reference_note(["persona", "base"], header="", footer="")
+
+    assert note.splitlines()[0].startswith("参考图 1：")
+    assert note.splitlines()[-1].startswith("参考图 2：")
+
+
+def test_reference_note_blank_configured_role_adds_no_line():
+    note = reference_note(["persona", "pose"], settings={"reference_role_pose": "  "})
+
+    assert "参考图 2" not in note
+    assert "参考图 1：固定人物身份，脸和身份保持一致" in note

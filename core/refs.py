@@ -15,7 +15,7 @@ from .logbook import get_logger
 
 logger = get_logger("refs")
 
-ROLES: tuple[str, ...] = ("subject", "clothing", "style", "pose", "background")
+ROLES: tuple[str, ...] = ("subject", "object", "clothing", "style", "pose", "background")
 DEFAULT_ROLE = "subject"
 INDEX_NAME = "index.json"
 _TEMP_NAME = f"{INDEX_NAME}.tmp"

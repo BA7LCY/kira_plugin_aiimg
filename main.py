@@ -96,6 +96,9 @@ _ACK_WATCH_TTL = 300.0
 # free for role-tagged reference uploads. The hard cap lives in refbridge.
 _ATTACHMENT_LIMIT = 4
 
+# 一条消息里最多放几张图；超了分条，单条失败再逐张补发。
+_IMAGES_PER_MESSAGE = 4
+
 PLUGIN_ID = "kira_plugin_aiimg"
 
 _VERSION_CACHE: str | None = None
@@ -193,6 +196,14 @@ def _looks_like_image(data: bytes) -> bool:
     return True
 
 
+# 五个生成工具共用的分工说明，写在每个工具描述末尾，省得模型自己猜。
+_TOOL_GUIDE = (
+    "分工：generate_image 从零画一张；edit_image 改已有图片；"
+    "generate_selfie 带人物身份生成自拍；generate_image_batch 一次要好几张；"
+    "generate_video 出视频。"
+)
+
+
 class AIImagePlugin(BasePlugin):
     def __init__(self, ctx, cfg):
         super().__init__(ctx, cfg)
@@ -210,6 +221,8 @@ class AIImagePlugin(BasePlugin):
         self._config_lock = asyncio.Lock()
         self._ready = False
         self._builtin_tags_logged = False
+        # 初始化失败时留住原因，页面顶部要能看到，不能静默变成「插件在、页面没了」。
+        self._startup_error = ""
         # Collapses an identical request repeated within a few seconds.
         self._debounce = Debouncer(0.0)
         # Turns that submitted a task and still owe the user an acknowledgement.
@@ -220,7 +233,39 @@ class AIImagePlugin(BasePlugin):
     # ------------------------------------------------------------------
 
     async def initialize(self):
+        """初始化；任何异常都留档后正常返回，保证控制台页面还能注册出来。"""
+        try:
+            await self._initialize()
+        except Exception as exc:
+            self._startup_error = f"{type(exc).__name__}: {exc}"
+            self._ready = False
+            logger.error(
+                "[aiimg] 插件初始化失败，页面仍会打开但功能不可用：%s",
+                self._startup_error,
+                exc_info=True,
+            )
+
+    def _normalize_config_in_place(self) -> None:
+        """把配置补齐成完整形状，两个设置页看到同一份值。
+
+        框架把同一个 dict 交给插件，就地改它，框架页读到的就是补全后的值。
+        """
+        current = self.plugin_cfg
+        if not isinstance(current, dict):
+            return
+        try:
+            normalized = settings_mod.normalize(current)
+        except ValueError as exc:
+            logger.warning("[aiimg] 配置不完整，按原样启动：%s", exc)
+            return
+        if not isinstance(normalized, dict):
+            return
+        current.clear()
+        current.update(normalized)
+
+    async def _initialize(self):
         started = time.perf_counter()
+        self._normalize_config_in_place()
         self._data_dir = self.ctx.get_plugin_data_dir()
         self._data_dir.mkdir(parents=True, exist_ok=True)
         self._debounce.configure(
@@ -355,6 +400,13 @@ class AIImagePlugin(BasePlugin):
             value = settings_mod.field_default("section_features", key, default)
         return str(value or default).strip()
 
+    def _prompts(self, key: str, default: str = "") -> str:
+        """Read one text field from the prompt settings card."""
+        value = self._cfg("section_prompts", key)
+        if value is None:
+            value = settings_mod.field_default("section_prompts", key, default)
+        return str(value or "").strip()
+
     def _fetch_policy(self) -> URLFetchPolicy:
         """Build the fetch policy from provider + advanced section config."""
         advanced = self._cfg("section_advanced") or {}
@@ -473,9 +525,11 @@ class AIImagePlugin(BasePlugin):
     def _preset_map(self, kind: str) -> dict[str, str]:
         """Parse "name: prompt" preset lines into a lookup table."""
         key = "draw_presets" if kind == "generate" else "edit_presets"
-        raw = self._lines(self._cfg("section_features", key, default=[]))
+        raw = self._cfg("section_prompts", key)
+        if raw is None:
+            raw = settings_mod.field_default("section_prompts", key, "")
         presets: dict[str, str] = {}
-        for line in raw:
+        for line in self._lines(raw):
             text = str(line or "").strip()
             if not text:
                 continue
@@ -1085,7 +1139,7 @@ class AIImagePlugin(BasePlugin):
         }
         if record.size:
             payload["size"] = record.size
-        instruction = self._features("ack_notification_prompt", "")
+        instruction = self._prompts("ack_notification_prompt", "")
         if instruction:
             payload["instruction"] = render_template(
                 instruction,
@@ -1144,7 +1198,11 @@ class AIImagePlugin(BasePlugin):
 
     @register.tool(
         name="generate_image",
-        description="根据文字描述生成图片。任务进入队列，完成后会自动把图片发送给发起者。可指定服务商、尺寸（如 1024x1024）、比例（如 16:9）或分辨率（1K/2K/4K）。用户只是随口描述画面、没说要图时不要调用。",
+        description=(
+            "从零生成一张图片。用户没说改图、也没给原图时用它。"
+            "例：画一只戴帽子的橘猫；来一张 16:9 的雪山日落。"
+            + _TOOL_GUIDE
+        ),
         params={
             "type": "object",
             "properties": {
@@ -1179,7 +1237,14 @@ class AIImagePlugin(BasePlugin):
 
     @register.tool(
         name="edit_image",
-        description="基于现有图片进行修改（图生图）。image 留空时用当前消息或所回复消息里的图片，可以一次带多张（最多 4 张，其余作为参考图）；传 'latest' 用本会话最近生成的图片；也可以传 find_image 给出的图片编号或图片文件路径。可用 reference_roles 按角色挑参考图（subject 主体、clothing 服装、style 画风、pose 姿势、background 背景），选中的上传参考图会和原图一起发过去。",
+        description=(
+            "基于已有图片修改（图生图）。image 留空时用当前消息或所回复消息里的图片；"
+            "一次可以带多张：第一张当原图，其余按 reference_roles 当参考图，单次最多 8 张。"
+            "也可传 'latest' 用本会话最近生成的图，或 find_image 返回的编号、本地图片路径。"
+            "角色可选 subject、clothing、style、pose、background、object。"
+            "例：把这张照片的背景换成海边；给图里的人物加一顶帽子。"
+            + _TOOL_GUIDE
+        ),
         params={
             "type": "object",
             "properties": {
@@ -1302,7 +1367,12 @@ class AIImagePlugin(BasePlugin):
 
     @register.tool(
         name="generate_selfie",
-        description="使用当前人设的参考照片（或自己上传的参考图）生成自拍/人像图。参考图在哪配由插件设置决定，调用方不需要提供。可用 reference_roles 按角色挑参考图（subject 主体、clothing 服装、style 画风、pose 姿势、background 背景），选中的上传参考图会和人物参考一起发过去。",
+        description=(
+            "用当前人设的参考照片生成自拍或人像。用户说「来张自拍」「拍张照」时用它；"
+            "参考图由插件设置提供，调用方不用传。"
+            "例：拍一张今天在咖啡馆的自拍；用这个造型来张侧脸。"
+            + _TOOL_GUIDE
+        ),
         params={
             "type": "object",
             "properties": {
@@ -1394,9 +1464,11 @@ class AIImagePlugin(BasePlugin):
     @register.tool(
         name="generate_image_batch",
         description=(
-            "一次生成多张图片。可以直接给 prompts（每张一条提示词），"
-            "也可以只给 brief 一句话，由插件调用模型拆成多条风格不同、画幅不同的提示词。"
-            "任务进入队列，完成后把全部图片一起发送。"
+            "一次生成多张图。用户说「来四张」「多画几个版本」时用它，别连着调用四次单张。"
+            "可以给 prompts，也可以只给 brief 让插件拆成多条不同构图的提示词；"
+            "image 当人物或参考图，selfie=true 时按自拍处理。"
+            "例：按这个想法来四张不同构图；把这组提示词一次跑完。"
+            + _TOOL_GUIDE
         ),
         params={
             "type": "object",
@@ -1427,6 +1499,14 @@ class AIImagePlugin(BasePlugin):
                     "description": "打算生成几张，1 到批量上限；0 用设置里的默认值",
                 },
                 "provider": {"type": "string", "description": "服务商 id"},
+                "image": {
+                    "type": "string",
+                    "description": "参考图或原图。留空按文字生成；'latest' 用最近一张；也可以给 find_image 的编号或消息里的图片",
+                },
+                "selfie": {
+                    "type": "boolean",
+                    "description": "true 时按自拍处理：把 image 当人物参考图，每张都套用自拍提示词前缀",
+                },
                 "size": {"type": "string", "description": "精确尺寸"},
                 "aspect_ratio": {"type": "string", "description": "比例"},
                 "resolution": {"type": "string", "description": "分辨率档位"},
@@ -1444,6 +1524,8 @@ class AIImagePlugin(BasePlugin):
         size: str = "",
         aspect_ratio: str = "",
         resolution: str = "",
+        image: str = "",
+        selfie: bool = False,
     ) -> str:
         if not self._ready or not self._gallery:
             return "插件未就绪"
@@ -1451,6 +1533,11 @@ class AIImagePlugin(BasePlugin):
             return self._denied("generate_image_batch", "白名单")
         if not self._feature_on("batch_enabled"):
             return self._denied("generate_image_batch", "功能关闭")
+        photo: Path | None = None
+        if str(image or "").strip() or selfie:
+            photo = await self._resolve_input_image(event, image)
+            if photo is None:
+                return self._denied("generate_image_batch", "没有可用的输入图片")
         prompts = self._batch_prompts(prompts)
         if not prompts:
             idea = str(brief or "").strip()
@@ -1460,6 +1547,19 @@ class AIImagePlugin(BasePlugin):
             if problem:
                 return problem
             prompts = planned
+        if selfie:
+            from .core.prompt import apply_prefix
+
+            prefix = self._prompts("selfie_prompt_prefix", "")
+            dressed: list[Any] = []
+            for item in prompts:
+                text = str(item.get("prompt") or "") if isinstance(item, dict) else str(item)
+                final, _layer = apply_prefix(text, prefix, name="selfie_prefix")
+                if isinstance(item, dict) and item.get("output"):
+                    dressed.append({"prompt": final, "output": item["output"]})
+                else:
+                    dressed.append(final)
+            prompts = dressed
         limit = int(self._cfg("section_queue", "batch_max_count", default=8) or 8)
         if len(prompts) > limit:
             prompts = prompts[:limit]
@@ -1469,10 +1569,19 @@ class AIImagePlugin(BasePlugin):
         extra = self._task_extra(
             event,
             explicit=self._explicit(size, aspect_ratio, resolution),
-            default_output=self._default_output_for("generate_image"),
+            default_output=self._default_output_for("generate_selfie" if selfie else "generate_image"),
             prompts=prompts,
             chain_items=[self._chain_item_dict(item) for item in chain],
         )
+        if photo is not None:
+            extra["input_image"] = str(photo)
+            logger.info(
+                "[aiimg] 批量任务带参考图：%s（自拍=%s）",
+                photo.name,
+                "是" if selfie else "否",
+            )
+        if selfie:
+            extra["selfie"] = True
         first_prompt = prompts[0]["prompt"] if isinstance(prompts[0], dict) else prompts[0]
         record = self._store.create(
             kind="generate_image_batch",
@@ -1544,7 +1653,12 @@ class AIImagePlugin(BasePlugin):
 
     @register.tool(
         name="generate_video",
-        description="生成 AI 视频。image 留空时用当前消息或所回复消息里的图片作关键帧，传 'latest' 用最近生成的图片，也可以传 find_image 给出的编号或图片路径。任务生成较慢，完成后自动发送。",
+        description=(
+            "生成 AI 视频。用户明确要视频时用它；image 留空时用消息里的图片作关键帧，"
+            "传 'latest' 用最近生成的图，也可以给 find_image 的编号或图片路径。"
+            "例：让这张图里的云动起来；来一段海边日落的视频。"
+            + _TOOL_GUIDE
+        ),
         params={
             "type": "object",
             "properties": {
@@ -1722,24 +1836,26 @@ class AIImagePlugin(BasePlugin):
         elements = self._media_elements(record)
         if not elements:
             return self._denied("resend_image", "那条结果不在了")
-        await self._safe_send(event.sid, MessageChain(elements))
-        self._mark_ack_delivered(record.task_id)
+        sent, attempts = await self._send_media(event.sid, elements)
+        self._record_delivery(record, sent, attempts)
+        if sent:
+            self._mark_ack_delivered(record.task_id)
         logger.info(
-            "[aiimg] 重发任务 %s 的 %d 个元素到 %s",
+            "[aiimg] 重发任务 %s 的 %d 个元素到 %s：%s",
             record.task_id,
             len(elements),
             event.sid,
+            "成功" if sent else "失败",
         )
-        return json.dumps(
-            {
-                "status": "resent",
-                "task_id": record.task_id,
-                "kind": record.kind,
-                "count": len(elements),
-            },
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
+        payload = {
+            "status": "resent" if sent else "failed",
+            "task_id": record.task_id,
+            "kind": record.kind,
+            "count": len(elements),
+        }
+        if not sent:
+            payload["reason"] = "发送失败"
+        return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
 
     async def _resend_by_ref(self, event: Any, ref: str) -> str:
         """Send one remembered file back by its short ref."""
@@ -1953,6 +2069,21 @@ class AIImagePlugin(BasePlugin):
             "、".join(refs),
         )
         return refs
+
+    def _spill_image(self, task_id: str, index: int, data: bytes) -> str:
+        """画廊写不进去时，先把字节落到临时目录，至少还能发给用户。"""
+        try:
+            folder = self._data_dir / "recovered"
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"{task_id}-{index}.png"
+            path.write_bytes(data)
+            logger.warning(
+                "[aiimg] 任务 %s 第 %d 张转存到临时文件：%s", task_id, index, path
+            )
+            return str(path)
+        except Exception as exc:
+            logger.error("[aiimg] 任务 %s 临时文件写入失败：%s", task_id, exc)
+            return ""
 
     def _visible(self, event: Any, record: TaskRecord) -> bool:
         """Whether this session may look at that record.
@@ -2215,9 +2346,11 @@ class AIImagePlugin(BasePlugin):
             return ""
         images = self._message_images(event)
         if images:
-            return (
-                f"本轮消息里有 {len(images)} 张可用图片，改图或图生视频时 image 留空即可直接使用。"
+            template = self._prompts(
+                "media_hint_with_images",
+                "本轮消息里有 {{count}} 张可用图片，改图或图生视频时 image 留空即可直接使用。",
             )
+            return template.replace("{{count}}", str(len(images))).strip()
         messages = list(getattr(event, "messages", None) or [])
         for message in reversed(messages):
             for element in getattr(message, "chain", None) or []:
@@ -2226,9 +2359,10 @@ class AIImagePlugin(BasePlugin):
                 quoted = getattr(element, "chain", None) or []
                 if any(isinstance(item, Image) for item in quoted):
                     continue
-                return (
+                return self._prompts(
+                    "media_hint_without_images",
                     "用户引用了历史消息，但平台没有提供其中的图片内容；"
-                    "需要改图时请把那张图片重新发一次。"
+                    "需要改图时请把那张图片重新发一次。",
                 )
         return ""
 
@@ -2269,10 +2403,9 @@ class AIImagePlugin(BasePlugin):
     async def _run_generate(self, record: TaskRecord) -> dict:
         return await self._run_image_chain(record, kind="generate")
 
-    @staticmethod
-    def _reference_prompt(prompt: str, roles: list[str]) -> tuple[str, str]:
+    def _reference_prompt(self, prompt: str, roles: list[str]) -> tuple[str, str]:
         """Final prompt with the reference note appended once two images are sent."""
-        note = reference_note(roles)
+        note = reference_note(roles, settings=self.plugin_cfg)
         text = str(prompt or "").strip()
         if not note:
             return text, ""
@@ -2318,7 +2451,7 @@ class AIImagePlugin(BasePlugin):
             raise RuntimeError("自拍参考图不存在，请重新配置")
         from .core.prompt import apply_prefix
 
-        prefix = self._features("selfie_prompt_prefix", "")
+        prefix = self._prompts("selfie_prompt_prefix", "")
         final_prompt, layer = apply_prefix(record.prompt, prefix, "selfie_prefix")
         final_prompt, note = self._reference_prompt(
             final_prompt, [role for _path, role in pairs]
@@ -2371,7 +2504,13 @@ class AIImagePlugin(BasePlugin):
                     extra=extra,
                 )
                 try:
-                    result = await self._run_image_chain(sub, kind="generate")
+                    source = str(extra.get("input_image") or "")
+                    images = [Path(source)] if source else None
+                    result = await self._run_image_chain(
+                        sub,
+                        kind="edit" if images else "generate",
+                        images=images,
+                    )
                     media.extend(result.get("media") or [])
                     provider = result.get("provider") or provider
                     model = result.get("model") or model
@@ -2387,14 +2526,14 @@ class AIImagePlugin(BasePlugin):
             "provider": provider,
             "model": model,
             "size": size,
-            "caption": f"批量任务共 {len(media)} 张",
+            "caption": "",
             "count": len(media),
             "partial_errors": errors,
         }
 
     async def _render_video_frame(self, record: TaskRecord, source: Path) -> Path | None:
         """Build the opening still frame when a frame template is configured."""
-        template = self._features("selfie_video_frame_template", "")
+        template = self._prompts("selfie_video_frame_template", "")
         if not template or not self._registry:
             return None
         chain = self._edit_chain()
@@ -2618,8 +2757,8 @@ class AIImagePlugin(BasePlugin):
                 # HTTP 200 only means the request was accepted; a step counts
                 # as a success only when real image bytes come back.
                 usable = []
-                for item in results or []:
-                    raw = getattr(item, "data", b"") or b""
+                for candidate in results or []:
+                    raw = getattr(candidate, "data", b"") or b""
                     if not await asyncio.to_thread(_looks_like_image, raw):
                         logger.warning(
                             "[aiimg] 任务 %s 服务商 %s 返回的数据不是图片，丢弃（%dB）",
@@ -2628,66 +2767,9 @@ class AIImagePlugin(BasePlugin):
                             len(raw),
                         )
                         continue
-                    usable.append(item)
+                    usable.append(candidate)
                 if not usable:
                     raise RuntimeError("服务商没有返回可用的图片")
-                collected = usable
-                media: list[str] = []
-                model = ""
-                size = ""
-                gallery_kind = "selfie" if record.kind == "generate_selfie" else "image"
-                for result in collected:
-                    path = await self._gallery.save_image(
-                        result.data,
-                        provider_id=provider_id,
-                        model=result.model or "",
-                        size=result.size or "",
-                        sid=record.sid,
-                        task_id=record.task_id,
-                        kind=gallery_kind,
-                        prompt=final_prompt,
-                        dedupe=True,
-                    )
-                    media.append(str(path))
-                    model = result.model or model
-                    size = result.size or size
-                    logger.info(
-                        "[aiimg] 任务 %s 第 %d 张已存画廊：%s（%dB）",
-                        record.task_id,
-                        len(media),
-                        Path(path).name,
-                        len(result.data),
-                    )
-                record.provider = provider_id
-                record.extra["prompt_layers"] = record.extra.get("prompt_layers") or [
-                    {"name": "user_prompt", "source": "caller", "text": final_prompt}
-                ]
-                record.extra["final_prompt"] = final_prompt
-                self._store.set_audit(
-                    record.task_id,
-                    prompt_layers=record.extra.get("prompt_layers"),
-                    final_prompt=record.extra.get("final_prompt", ""),
-                )
-                cost = (time.monotonic() - started) * 1000
-                await self._stats.record_success(provider_id, cost)
-                logger.info(
-                    "[aiimg] 任务 %s 服务商 %s 成功，%dms 已保存 %d 张",
-                    record.task_id, provider_id, int(cost), len(media),
-                )
-                refs = self._remember_media(
-                    media,
-                    record=record,
-                    kind=gallery_kind,
-                    prompt=final_prompt,
-                )
-                return {
-                    "media": media,
-                    "refs": refs,
-                    "provider": provider_id,
-                    "model": model,
-                    "size": size,
-                    "caption": "",
-                }
             except StopProviderChain as exc:
                 last_error = str(exc) or "provider requested chain stop"
                 await self._stats.record_failure(
@@ -2715,6 +2797,97 @@ class AIImagePlugin(BasePlugin):
                         self._consecutive_failures(provider_id),
                     )
                 continue
+
+            # 图已经到手，从这里开始就算成功。存库和记账是善后，
+            # 出问题只记日志，不再换服务商重新生成，免得同一张图付两次钱。
+            media: list[str] = []
+            model = ""
+            size = ""
+            gallery_kind = (
+                "selfie"
+                if record.kind == "generate_selfie" or record.extra.get("selfie")
+                else "image"
+            )
+            for candidate in usable:
+                model = candidate.model or model
+                size = candidate.size or size
+                try:
+                    path = await self._gallery.save_image(
+                        candidate.data,
+                        provider_id=provider_id,
+                        model=candidate.model or "",
+                        size=candidate.size or "",
+                        sid=record.sid,
+                        task_id=record.task_id,
+                        kind=gallery_kind,
+                        prompt=final_prompt,
+                        dedupe=True,
+                    )
+                except Exception as exc:
+                    logger.error(
+                        "[aiimg] 任务 %s 第 %d 张存画廊失败：%s",
+                        record.task_id,
+                        len(media) + 1,
+                        exc,
+                    )
+                    path = await asyncio.to_thread(
+                        self._spill_image, record.task_id, len(media) + 1, candidate.data
+                    )
+                    if not path:
+                        logger.error(
+                            "[aiimg] 任务 %s 第 %d 张没能落盘，跳过发送",
+                            record.task_id,
+                            len(media) + 1,
+                        )
+                        continue
+                media.append(str(path))
+                logger.info(
+                    "[aiimg] 任务 %s 第 %d 张已保存：%s（%dB）",
+                    record.task_id,
+                    len(media),
+                    Path(path).name,
+                    len(candidate.data),
+                )
+            record.provider = provider_id
+            record.extra["prompt_layers"] = record.extra.get("prompt_layers") or [
+                {"name": "user_prompt", "source": "caller", "text": final_prompt}
+            ]
+            record.extra["final_prompt"] = final_prompt
+            try:
+                self._store.set_audit(
+                    record.task_id,
+                    prompt_layers=record.extra.get("prompt_layers"),
+                    final_prompt=record.extra.get("final_prompt", ""),
+                )
+            except Exception as exc:
+                logger.warning("[aiimg] 任务 %s 记录提示词审计失败：%s", record.task_id, exc)
+            cost = (time.monotonic() - started) * 1000
+            try:
+                await self._stats.record_success(provider_id, cost)
+            except Exception as exc:
+                logger.warning("[aiimg] 任务 %s 记录服务商成功失败：%s", record.task_id, exc)
+            logger.info(
+                "[aiimg] 任务 %s 服务商 %s 成功，%dms 已保存 %d 张",
+                record.task_id, provider_id, int(cost), len(media),
+            )
+            try:
+                refs = self._remember_media(
+                    media,
+                    record=record,
+                    kind=gallery_kind,
+                    prompt=final_prompt,
+                )
+            except Exception as exc:
+                logger.warning("[aiimg] 任务 %s 记录图片编号失败：%s", record.task_id, exc)
+                refs = []
+            return {
+                "media": media,
+                "refs": refs,
+                "provider": provider_id,
+                "model": model,
+                "size": size,
+                "caption": "",
+            }
         raise RuntimeError(f"所有服务商均失败: {last_error or '无可用服务商'}")
 
     # ------------------------------------------------------------------
@@ -2744,7 +2917,7 @@ class AIImagePlugin(BasePlugin):
         return await self._publish_notification(
             record,
             [Text(_facts_text(facts))],
-            self._features("result_notification_prompt", ""),
+            self._prompts("result_notification_prompt", ""),
             facts,
             marker=_ERROR_MARKER if facts.get("status") != "succeeded" else "",
             template_key="result_notification_prompt",
@@ -2839,12 +3012,13 @@ class AIImagePlugin(BasePlugin):
         if not elements:
             await self._notify_failure(record)
             return
-        template = self._features("result_notification_prompt", "")
+        template = self._prompts("result_notification_prompt", "")
         # Deliver the media ourselves before asking the model for a sentence.
         # The synthetic event below reaches the model only; whatever it replies
         # is a separate message, so an empty reply can no longer swallow the
         # image.
-        delivered = await self._safe_send(record.sid, MessageChain(elements))
+        delivered, send_attempts = await self._send_media(record.sid, elements)
+        self._record_delivery(record, delivered, send_attempts)
         if delivered:
             self._mark_ack_delivered(record.task_id)
             logger.info(
@@ -2873,7 +3047,13 @@ class AIImagePlugin(BasePlugin):
             "已交给模型" if published else "未发布（模型侧不可用）",
         )
 
-    async def _safe_send(self, sid: str, chain: MessageChain) -> bool:
+    async def _safe_send(
+        self,
+        sid: str,
+        chain: MessageChain,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> bool:
         """Deliver a chain with retries; report whether anything reached the chat.
 
         A finished image is expensive to lose, so transient adapter failures are
@@ -2884,6 +3064,9 @@ class AIImagePlugin(BasePlugin):
         if not isinstance(advanced, dict):
             advanced = {}
         attempts = int(advanced.get("delivery_attempts") or 3)
+        if timeout_seconds is None:
+            is_video = any(type(element).__name__ == "Video" for element in chain)
+            timeout_seconds = self._send_timeout(is_video)
         return await deliver_chain(
             self.ctx.send_message_chain,
             sid,
@@ -2891,7 +3074,80 @@ class AIImagePlugin(BasePlugin):
             make_chain=MessageChain,
             logger=logger,
             attempts=attempts,
+            timeout_seconds=timeout_seconds,
         )
+
+    def _send_timeout(self, is_video: bool) -> float:
+        """发送一条消息最多等多久；视频比图片慢，分开配。"""
+        advanced = self._cfg("section_advanced") or {}
+        if not isinstance(advanced, dict):
+            advanced = {}
+        key, default = (
+            ("video_send_timeout_seconds", 180) if is_video else ("delivery_timeout_seconds", 90)
+        )
+        try:
+            value = float(advanced.get(key) or default)
+        except (TypeError, ValueError):
+            value = float(default)
+        return max(1.0, value)
+
+    @staticmethod
+    def _media_chains(elements: list[Any]) -> list[list[Any]]:
+        """按 OneBot 的习惯分条：视频一条一个，图片一条最多 4 张。
+
+        NapCat 只按第一条元素分流，视频和图片混在一条链里，后面的图片会被丢掉。
+        """
+        images: list[Any] = []
+        chains: list[list[Any]] = []
+        for element in elements:
+            name = type(element).__name__
+            if name == "Video":
+                chains.append([element])
+            elif name == "Image":
+                images.append(element)
+            else:
+                chains.append([element])
+        for start in range(0, len(images), _IMAGES_PER_MESSAGE):
+            chains.append(images[start : start + _IMAGES_PER_MESSAGE])
+        return chains
+
+    async def _send_media(self, sid: str, elements: list[Any]) -> tuple[bool, int]:
+        """分条发送结果，返回（是否全部送达, 尝试的条数）。"""
+        chains = self._media_chains(elements)
+        total_attempts = 0
+        sent = 0
+        for index, chain in enumerate(chains, 1):
+            is_video = type(chain[0]).__name__ == "Video"
+            logger.info(
+                "[aiimg] 发送第 %d/%d 条：%s %d 个",
+                index,
+                len(chains),
+                "视频" if is_video else "图片",
+                len(chain),
+            )
+            ok = await self._safe_send(sid, MessageChain(chain))
+            total_attempts += 1
+            if ok:
+                sent += len(chain)
+            else:
+                logger.warning(
+                    "[aiimg] 第 %d/%d 条没发出去（%d 个元素）",
+                    index,
+                    len(chains),
+                    len(chain),
+                )
+        return sent == len(elements), total_attempts
+
+    def _record_delivery(self, record: TaskRecord, ok: bool, attempts: int) -> None:
+        """记住这条任务最后有没有真的送到聊天；只给页面看，不触发重发。"""
+        setter = getattr(self._store, "set_delivery", None)
+        if not callable(setter):
+            return
+        state = "delivered" if ok else "failed"
+        try:
+            setter(record.task_id, state, attempts)
+        except Exception as exc:
+            logger.warning("[aiimg] 记录投递状态失败（%s）：%s", record.task_id, exc)
 
     async def _publish_notification(
         self,
@@ -3000,7 +3256,7 @@ class AIImagePlugin(BasePlugin):
         if not draw and not edit:
             return
         lines: list[str] = []
-        intro = str(self._features("presets_prompt", "") or "").strip()
+        intro = self._prompts("presets_prompt", "")
         if intro:
             lines.append(intro)
         for name, text in draw.items():
@@ -3087,6 +3343,7 @@ class AIImagePlugin(BasePlugin):
             "provider_errors": registry.validate() if registry else [],
             "queue": queue,
             "gallery": self._gallery.stats() if self._gallery else {},
+            "startup_error": self._startup_error,
         }
 
     @register.api(method="GET", path="/aiimg/status", auth=True, summary="插件状态")
@@ -3258,6 +3515,21 @@ class AIImagePlugin(BasePlugin):
                 "notes": settings_mod.warnings(config_now),
             }
 
+    def _saved_provider_for(self, root: str) -> dict[str, Any] | None:
+        """Find a saved provider whose address matches, so keys never leave home."""
+        wanted = str(root or "").strip().rstrip("/")
+        if not wanted:
+            return None
+        providers = (self.plugin_cfg or {}).get("providers") or []
+        for provider in providers:
+            if not isinstance(provider, dict):
+                continue
+            for key in ("base_url", "server_url"):
+                value = str(provider.get(key) or "").strip().rstrip("/")
+                if value and value == wanted:
+                    return provider
+        return None
+
     @register.api(method="POST", path="/aiimg/models", auth=True, summary="按接口地址拉取模型列表")
     async def api_fetch_models(self, payload: dict):
         from fastapi import HTTPException
@@ -3266,12 +3538,19 @@ class AIImagePlugin(BasePlugin):
         base_url = str(data.get("base_url") or "").strip()
         api_key = str(data.get("api_key") or "").strip()
         server_url = str(data.get("server_url") or "").strip()
-        if api_key:
-            # 设置页只会看到掩码，拉模型时把它换回真正的密钥
-            api_key = settings_mod.unmask_key(api_key, self.plugin_cfg)
         root = base_url or server_url
         if not root:
             raise HTTPException(400, "先填好接口地址再获取模型")
+        # 只给已经保存过的服务商拉模型：地址来自请求体、又带着真钥去请求，
+        # 等于给了一个把密钥发到任意主机的口子。
+        saved = self._saved_provider_for(root)
+        if saved is None:
+            raise HTTPException(400, "先把接口地址保存成服务商，再拉取模型")
+        stored_keys = [str(key) for key in (saved.get("api_keys") or []) if str(key).strip()]
+        if api_key:
+            api_key = settings_mod.unmask_key(api_key, self.plugin_cfg)
+        if not api_key and stored_keys:
+            api_key = stored_keys[0]
         url = root.rstrip("/") + "/models"
         policy = self._fetch_policy()
         try:
@@ -3282,7 +3561,12 @@ class AIImagePlugin(BasePlugin):
         try:
             timeout = aiohttp.ClientTimeout(total=30)
             session = await current_session()
-            async with session.get(url, headers=headers, timeout=timeout) as resp:
+            async with session.get(
+                url,
+                headers=headers,
+                timeout=timeout,
+                allow_redirects=False,
+            ) as resp:
                 text = await resp.text()
                 if resp.status != 200:
                     raise HTTPException(502, f"接口返回 {resp.status}，检查地址和密钥")
@@ -3323,6 +3607,44 @@ class AIImagePlugin(BasePlugin):
             offset=max(0, offset),
         )
         return {"tasks": [record.to_dict() for record in records], "total": total}
+
+    @register.api(method="GET", path="/aiimg/inspirations", auth=True, summary="灵感库")
+    async def api_inspirations(self):
+        store = self._inspiration
+        if store is None:
+            return {"items": [], "total": 0}
+        try:
+            items = store.list(scoped=False, limit=store.limit)
+        except Exception as exc:
+            logger.warning("[aiimg] 读取灵感库失败：%s", exc)
+            return {"items": [], "total": 0, "error": "读取失败"}
+        rows = [
+            {
+                "id": str(item.get("id") or ""),
+                "text": str(item.get("text") or ""),
+                "tags": list(item.get("tags") or []),
+                "uses": int(item.get("uses") or 0),
+                "created_at": int(item.get("created_at") or 0),
+            }
+            for item in items
+        ]
+        return {"items": rows, "total": len(store)}
+
+    @register.api(method="POST", path="/aiimg/inspirations/delete", auth=True, summary="删除灵感")
+    async def api_inspiration_delete(self, payload: dict):
+        store = self._inspiration
+        if store is None:
+            return {"ok": False, "error": "灵感库未就绪"}
+        data = payload if isinstance(payload, dict) else {}
+        entry_id = str(data.get("id") or "").strip()
+        if not entry_id:
+            return {"ok": False, "error": "缺少编号"}
+        try:
+            removed = bool(store.remove(entry_id))
+        except Exception as exc:
+            logger.warning("[aiimg] 删除灵感失败：%s", exc)
+            return {"ok": False, "error": "删除失败"}
+        return {"ok": removed, "id": entry_id}
 
     @register.api(method="POST", path="/aiimg/tasks/{task_id}/retry", auth=True, summary="重试失败任务")
     async def api_retry_task(self, payload: dict, task_id: str):

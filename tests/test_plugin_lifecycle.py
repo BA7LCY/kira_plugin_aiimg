@@ -249,6 +249,7 @@ class _PersonaMgr:
 def _config():
     return {
         "section_access": {"whitelist": ""},
+        "section_prompts": {},
         "section_features": {"draw_default_output": "1024x1024"},
         "section_queue": {"max_running": 2, "max_queued": 16},
         "section_gallery": {"max_count": 0, "retention_days": 0},
@@ -436,6 +437,21 @@ async def test_initialize_survives_missing_queue_numbers(plugin_module, tmp_path
     await plugin.initialize()
     try:
         assert plugin._ready is True
+    finally:
+        await plugin.terminate()
+
+
+async def test_initialize_carries_prompt_values_into_the_card(plugin_module, tmp_path):
+    """框架页读的是同一个配置对象，所以启动时就把它归一化到位。"""
+    config = _config()
+    config["section_prompts"] = {}
+    config["section_features"]["ack_notification_prompt"] = "旧位置写的接单语"
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path / "data"), config)
+
+    await plugin.initialize()
+    try:
+        assert plugin.plugin_cfg["section_prompts"]["ack_notification_prompt"] == "旧位置写的接单语"
+        assert "ack_notification_prompt" not in plugin.plugin_cfg["section_features"]
     finally:
         await plugin.terminate()
 
@@ -646,7 +662,7 @@ def test_append_fallback_keeps_order(plugin_module, tmp_path):
 
 def test_preset_lookup_and_apply(plugin_module, tmp_path):
     config = _config()
-    config["section_features"]["draw_presets"] = ["手办化:Transform into a figurine", "坏行"]
+    config["section_prompts"]["draw_presets"] = ["手办化:Transform into a figurine", "坏行"]
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
 
     prompt, name = plugin._apply_preset("一只猫", "手办化", "generate")
@@ -958,7 +974,7 @@ def test_notification_prompts_are_empty_by_default(plugin_module, tmp_path):
 
 def test_failed_task_without_a_prompt_asks_the_persona(plugin_module, tmp_path):
     config = _config()
-    config["section_features"]["result_notification_prompt"] = ""
+    config["section_prompts"]["result_notification_prompt"] = ""
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     bus = _Bus()
     plugin.ctx.adapter_mgr = _AdapterMgr(_Adapter())
@@ -993,7 +1009,7 @@ def test_failed_task_without_a_prompt_asks_the_persona(plugin_module, tmp_path):
 
 def test_failed_task_falls_back_to_plain_text(plugin_module, tmp_path):
     config = _config()
-    config["section_features"]["result_notification_prompt"] = ""
+    config["section_prompts"]["result_notification_prompt"] = ""
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     plugin.ctx.adapter_mgr = _AdapterMgr(_Adapter())
     sent = []
@@ -1016,7 +1032,7 @@ def test_failed_task_falls_back_to_plain_text(plugin_module, tmp_path):
 
 def test_failed_task_publishes_a_persona_notice(plugin_module, tmp_path):
     config = _config()
-    config["section_features"]["result_notification_prompt"] = "Explain {{error_kind}} in persona."
+    config["section_prompts"]["result_notification_prompt"] = "Explain {{error_kind}} in persona."
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     bus = _Bus()
     plugin.ctx.adapter_mgr = _AdapterMgr(_Adapter())
@@ -1156,7 +1172,7 @@ def test_notice_survives_an_older_trigger_signature(plugin_module, tmp_path):
 
 def test_error_notice_prompt_renders_task_facts(plugin_module, tmp_path):
     config = _config()
-    config["section_features"]["result_notification_prompt"] = "Explain {{error_kind}} in persona."
+    config["section_prompts"]["result_notification_prompt"] = "Explain {{error_kind}} in persona."
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     event = types.SimpleNamespace(
         message=types.SimpleNamespace(
@@ -1179,7 +1195,7 @@ def test_error_notice_without_a_prompt_still_gives_the_model_facts(
     plugin_module, tmp_path
 ):
     config = _config()
-    config["section_features"]["result_notification_prompt"] = ""
+    config["section_prompts"]["result_notification_prompt"] = ""
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     event = types.SimpleNamespace(
         message=types.SimpleNamespace(
@@ -1204,7 +1220,7 @@ def test_success_notice_without_a_prompt_still_gives_the_model_facts(
     plugin_module, tmp_path
 ):
     config = _config()
-    config["section_features"]["result_notification_prompt"] = ""
+    config["section_prompts"]["result_notification_prompt"] = ""
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     event = types.SimpleNamespace(
         message=types.SimpleNamespace(
@@ -1236,7 +1252,7 @@ def test_success_notice_without_a_prompt_still_gives_the_model_facts(
 def test_notice_marker_is_found_on_the_batch_event(plugin_module, tmp_path):
     """The workflow hands plugins a batch event whose messages carry the marker."""
     config = _config()
-    config["section_features"]["result_notification_prompt"] = "Say {{kind}} is ready."
+    config["section_prompts"]["result_notification_prompt"] = "Say {{kind}} is ready."
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     event = types.SimpleNamespace(
         messages=[
@@ -1273,7 +1289,7 @@ def test_notice_without_a_marker_leaves_the_prompt_alone(plugin_module, tmp_path
 
 def test_ack_text_is_task_facts_without_an_instruction(plugin_module, tmp_path):
     config = _config()
-    config["section_features"]["ack_notification_prompt"] = ""
+    config["section_prompts"]["ack_notification_prompt"] = ""
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     record = plugin_module.TaskRecord(
         task_id="t4", kind="generate_image", sid="s4", status="queued"
@@ -1290,7 +1306,7 @@ def test_ack_text_is_task_facts_without_an_instruction(plugin_module, tmp_path):
 
 def test_ack_prompt_renders_into_the_instruction(plugin_module, tmp_path):
     config = _config()
-    config["section_features"]["ack_notification_prompt"] = "Tell them about {{task_id}}."
+    config["section_prompts"]["ack_notification_prompt"] = "Tell them about {{task_id}}."
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     record = plugin_module.TaskRecord(
         task_id="t5", kind="generate_video", sid="s5", status="queued"
@@ -1539,6 +1555,81 @@ async def test_generate_selfie_explains_missing_uploads(plugin_module, tmp_path)
         await plugin.terminate()
 
     assert json.loads(ack)["reason"] == "还没有上传参考图"
+
+
+async def test_generate_image_batch_carries_the_reference_image(plugin_module, tmp_path):
+    data_dir = tmp_path / "data"
+    photo = _ref_file(data_dir / "input.png")
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False, False))
+    await plugin.initialize()
+    captured = []
+
+    async def fake_submit(record, runner, **kwargs):
+        captured.append(record)
+        return record.task_id
+
+    plugin._submit = fake_submit
+    plugin._image_chain = lambda kind="generate_image": [plugin_module.ChainItem(provider_id="p1")]
+    try:
+        ack = await plugin.generate_image_batch(
+            _tool_event(), prompts=["第一张", "第二张"], image=str(photo)
+        )
+    finally:
+        await plugin.terminate()
+
+    assert json.loads(ack)["status"] == "accepted"
+    assert captured[0].kind == "generate_image_batch"
+    assert captured[0].extra["input_image"] == str(photo)
+    assert "selfie" not in captured[0].extra
+
+
+async def test_generate_image_batch_prefixes_selfie_prompts(plugin_module, tmp_path):
+    data_dir = tmp_path / "data"
+    photo = _ref_file(data_dir / "input.png")
+    config = _plan_config(False, False)
+    config["section_prompts"] = {"selfie_prompt_prefix": "固定人物，第三人称"}
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), config)
+    await plugin.initialize()
+    captured = []
+
+    async def fake_submit(record, runner, **kwargs):
+        captured.append(record)
+        return record.task_id
+
+    plugin._submit = fake_submit
+    plugin._image_chain = lambda kind="generate_image": [plugin_module.ChainItem(provider_id="p1")]
+    try:
+        await plugin.generate_image_batch(
+            _tool_event(), prompts=["看镜头"], image=str(photo), selfie=True
+        )
+    finally:
+        await plugin.terminate()
+
+    assert captured[0].extra["selfie"] is True
+    assert captured[0].extra["prompts"] == ["固定人物，第三人称, 看镜头"]
+
+
+async def test_inspiration_api_lists_and_deletes(plugin_module, tmp_path):
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path / "data"), _plan_config(False, False))
+    await plugin.initialize()
+    try:
+        plugin._inspiration.add("雨夜的霓虹街道", tags=["夜", "街景"], sid="s1")
+        plugin._inspiration.add("清晨的窗边", sid="s1")
+        listed = await plugin.api_inspirations()
+        target = listed["items"][0]["id"]
+
+        removed = await plugin.api_inspiration_delete({"id": target})
+        missing = await plugin.api_inspiration_delete({})
+        after = await plugin.api_inspirations()
+    finally:
+        await plugin.terminate()
+
+    assert listed["total"] == 2
+    assert [item["text"] for item in listed["items"]] == ["清晨的窗边", "雨夜的霓虹街道"]
+    assert removed == {"ok": True, "id": target}
+    assert missing == {"ok": False, "error": "缺少编号"}
+    assert after["total"] == 1
+    assert after["items"][0]["text"] == "雨夜的霓虹街道"
 
 
 async def test_edit_image_sends_role_filtered_uploads(plugin_module, tmp_path):

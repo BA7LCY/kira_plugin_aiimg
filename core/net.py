@@ -110,6 +110,8 @@ async def ensure_peer_allowed(
     ``ensure_url_allowed`` resolves the name first; a hostname could still
     resolve to something else by the time the socket connects. Comparing the
     peer address closes that window for result downloads.
+
+    拿不到对端地址或地址解析失败时同样拒绝，不再静默放行。
     """
     current_origin = origin(str(url))
     if current_origin and current_origin in policy.trusted_origins:
@@ -122,10 +124,13 @@ async def ensure_peer_allowed(
         return
     address = peer_address(response)
     if not address:
-        return
+        # 拿不到对端地址时不放行：否则只要让连接对象没有 peername，
+        # 就能绕过下面的内网校验，等于复核形同虚设。
+        raise ValueError("无法确认图片地址连到哪里，已拒绝")
     try:
         ip = ipaddress.ip_address(address.split("%", 1)[0])
-    except ValueError:
-        return
+    except ValueError as exc:
+        # 地址存在但解析不了，同样无法确认对端，按拒绝处理。
+        raise ValueError("无法确认图片地址连到哪里，已拒绝") from exc
     if not ip.is_global:
         raise ValueError("图片地址实际连接到内网")

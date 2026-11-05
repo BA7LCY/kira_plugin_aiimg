@@ -2,6 +2,8 @@
 
 import pytest
 
+from core import planner
+from core import prompt as P
 from core import settings as S
 
 
@@ -18,7 +20,7 @@ def test_with_defaults_fills_every_section():
     config = S.with_defaults({})
 
     assert config["section_queue"]["max_running"] == 2
-    assert config["section_gallery"]["max_count"] == 0
+    assert config["section_gallery"]["max_count"] == 50
     assert config["providers"] == []
     assert config["chains"] == {}
     assert set(S.sections()) <= set(config)
@@ -143,12 +145,16 @@ def test_info_fields_are_not_written_to_config():
 
 
 def test_framework_schema_hides_console_only_fields():
-    fields = S.schema()["section_features"]["fields"]
+    features = S.schema()["section_features"]["fields"]
+    prompts = S.schema()["section_prompts"]["fields"]
 
-    assert "selfie_reference_files" not in fields
-    assert "selfie_include_uploads" not in fields
-    assert "ack_notification_prompt" not in fields
-    assert "selfie_use_persona" in fields
+    assert "selfie_reference_files" not in features
+    assert "selfie_include_uploads" not in features
+    assert "ack_notification_prompt" not in features
+    assert "selfie_use_persona" in features
+    for key in S.LEGACY_PROMPT_KEYS:
+        assert key not in features
+        assert key in prompts
 
 
 def test_console_sections_expose_console_only_fields():
@@ -167,10 +173,126 @@ def test_console_only_fields_follow_the_order_of_the_saved_layout():
     assert keys.index("selfie_follow_edit_chain") < keys.index("selfie_reference_files")
     assert keys.index("selfie_reference_files") < keys.index("selfie_include_uploads")
     assert keys.index("selfie_include_uploads") < keys.index("selfie_use_persona")
-    assert keys.index("selfie_use_persona") < keys.index("selfie_prompt_prefix")
-    assert keys.index("selfie_video_frame_template") < keys.index("prompts_heading")
-    assert keys.index("result_notification_prompt") < keys.index("draw_presets")
-    assert keys[-3:] == ["draw_presets", "edit_presets", "presets_prompt"]
+    assert not set(S.LEGACY_PROMPT_KEYS) & set(keys)
+
+
+def test_prompt_card_groups_moved_and_new_fields():
+    keys = list(S.sections()["section_prompts"]["fields"])
+
+    assert keys[:7] == list(S.LEGACY_PROMPT_KEYS)
+    assert keys[7] == "reference_heading"
+    assert keys[8:] == [
+        "reference_role_persona",
+        "reference_role_base",
+        "reference_role_subject",
+        "reference_role_object",
+        "reference_role_clothing",
+        "reference_role_style",
+        "reference_role_pose",
+        "reference_role_background",
+        "reference_note_header",
+        "reference_note_footer",
+        "media_hint_with_images",
+        "media_hint_without_images",
+    ]
+
+
+def test_prompt_card_defaults_match_the_prompt_module():
+    fields = S.schema()["section_prompts"]["fields"]
+
+    for role, text in P.REFERENCE_ROLE_PROMPTS.items():
+        assert fields[f"reference_role_{role}"]["default"] == text
+    assert fields["reference_note_header"]["default"] == P.REFERENCE_NOTE_HEADER
+    assert fields["reference_note_footer"]["default"] == P.REFERENCE_NOTE_FOOTER
+
+
+def test_planner_prompt_default_is_the_builtin_template():
+    fields = S.schema()["section_queue"]["fields"]
+
+    assert fields["planner_prompt"]["default"] == planner.DEFAULT_PLANNER_TEMPLATE
+    assert S.field_default("section_queue", "planner_prompt") == (
+        planner.DEFAULT_PLANNER_TEMPLATE
+    )
+
+
+def test_gallery_cleanup_defaults_are_finite():
+    fields = S.schema()["section_gallery"]["fields"]
+
+    assert fields["max_count"]["default"] == 50
+    assert fields["retention_days"]["default"] == 14
+    assert fields["selfie_max_count"]["default"] == 50
+    assert fields["selfie_retention_days"]["default"] == 14
+    assert fields["video_max_count"]["default"] == 20
+    assert fields["video_retention_days"]["default"] == 14
+
+
+def test_delivery_timeouts_are_declared_first_in_advanced():
+    fields = S.schema()["section_advanced"]["fields"]
+    keys = list(fields)
+
+    assert keys[:2] == ["delivery_timeout_seconds", "video_send_timeout_seconds"]
+    assert fields["delivery_timeout_seconds"]["default"] == 90
+    assert fields["delivery_timeout_seconds"]["min"] == 10
+    assert fields["delivery_timeout_seconds"]["max"] == 300
+    assert fields["video_send_timeout_seconds"]["default"] == 180
+    assert fields["video_send_timeout_seconds"]["min"] == 30
+    assert fields["video_send_timeout_seconds"]["max"] == 600
+
+
+def test_prompt_values_live_only_in_the_new_card():
+    config = S.with_defaults({})
+    config["section_prompts"]["draw_presets"] = "手办化:figurine"
+
+    out = S.normalize(config)
+
+    assert out["section_prompts"]["draw_presets"] == "手办化:figurine"
+    assert "draw_presets" not in out["section_features"]
+
+
+def test_legacy_prompt_values_move_to_the_new_card():
+    config = S.with_defaults({})
+    config["section_features"]["ack_notification_prompt"] = "旧指令"
+
+    out = S.normalize(config)
+
+    assert out["section_prompts"]["ack_notification_prompt"] == "旧指令"
+    assert "ack_notification_prompt" not in out["section_features"]
+
+
+def test_clearing_a_prompt_after_migration_stays_cleared():
+    config = S.with_defaults({})
+    config["section_features"]["ack_notification_prompt"] = "旧指令"
+    config = S.normalize(config)
+    assert config["section_prompts"]["_prompts_migrated"] is True
+
+    config["section_prompts"]["ack_notification_prompt"] = ""
+    out = S.normalize(config)
+
+    assert out["section_prompts"]["ack_notification_prompt"] == ""
+    assert "ack_notification_prompt" not in out["section_features"]
+
+
+def test_migration_marker_travels_through_the_page_payload():
+    shown = S.with_defaults({"section_features": {"ack_notification_prompt": "旧指令"}})
+    assert shown["section_prompts"]["ack_notification_prompt"] == "旧指令"
+    assert "ack_notification_prompt" not in shown["section_features"]
+
+    shown["section_prompts"]["ack_notification_prompt"] = ""
+    out = S.normalize(shown)
+
+    assert out["section_prompts"]["ack_notification_prompt"] == ""
+    assert "ack_notification_prompt" not in out["section_features"]
+
+
+def test_a_value_edited_in_the_new_card_beats_the_legacy_copy():
+    config = S.with_defaults({})
+    config["section_features"]["ack_notification_prompt"] = "旧指令"
+    config["section_prompts"]["ack_notification_prompt"] = "新指令"
+
+    out = S.normalize(config)
+
+    assert out["section_prompts"]["ack_notification_prompt"] == "新指令"
+    assert "ack_notification_prompt" not in out["section_features"]
 
 
 def test_framework_schema_keeps_only_the_toggles():
@@ -181,14 +303,15 @@ def test_framework_schema_keeps_only_the_toggles():
     assert "selfie_reference_files" not in fields
 
 
-def test_console_only_values_survive_defaults_and_normalize():
+def test_layout_only_values_stay_out_of_the_saved_config():
     config = S.with_defaults({})
     assert config["section_features"]["selfie_reference_files"] == ""
     config["section_features"]["draw_presets"] = "手办化:figurine"
 
     out = S.normalize(config)
 
-    assert out["section_features"]["draw_presets"] == "手办化:figurine"
+    assert out["section_prompts"]["draw_presets"] == "手办化:figurine"
+    assert "draw_presets" not in out["section_features"]
     # The list is read from the data directory, so it never enters the config.
     assert "selfie_reference_files" not in out["section_features"]
 

@@ -15,7 +15,7 @@ import random
 import sys
 import time
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlsplit
 
 import aiohttp
 
@@ -51,6 +51,66 @@ def _safe_url(url: str) -> str:
     text = str(url or "")
     head, sep, _query = text.partition("?")
     return f"{head}?…" if sep else head
+
+
+# 跟随重定向时可能需要剥掉的凭据头，比较时统一转小写。
+_CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie"})
+
+
+def _origin_key(url: str) -> tuple[str, str, int]:
+    """把 URL 归一化成 (协议, 主机, 端口)，用来判断两个地址是不是同一个 origin。
+
+    默认端口按协议补全（https 443、http 80），解析失败返回空元组占位，
+    这样非法地址永远不会被当成「同 origin」而放行凭据。
+    """
+    try:
+        parsed = urlsplit(str(url or "").strip())
+        scheme = (parsed.scheme or "").lower()
+        host = (parsed.hostname or "").lower()
+        port = parsed.port
+    except ValueError:
+        # 端口写成非数字时 urlsplit 会在这里抛错
+        return ("", "", 0)
+    if not scheme or not host:
+        return ("", "", 0)
+    if port is None:
+        if scheme == "https":
+            port = 443
+        elif scheme == "http":
+            port = 80
+        else:
+            port = 0
+    return (scheme, host, port)
+
+
+def _redirect_headers(
+    original_url: str, target_url: str, headers: dict[str, str] | None
+) -> dict[str, str] | None:
+    """跟随重定向时重算请求头。
+
+    只有目标地址与最初请求的绝对地址协议、主机、端口完全一致时才原样保留，
+    否则一律剥掉 Authorization / Proxy-Authorization / Cookie，避免把凭据
+    带到第三方主机上。原始地址本身不可解析时同样按跨域处理。
+    """
+    if not headers:
+        return headers
+    original_key = _origin_key(original_url)
+    if original_key != ("", "", 0) and original_key == _origin_key(target_url):
+        return headers
+    stripped = {
+        key: value
+        for key, value in headers.items()
+        if key.lower() not in _CREDENTIAL_HEADERS
+    }
+    removed = len(headers) - len(stripped)
+    if removed:
+        logger.info(
+            "地址校验：重定向跨域，已剥掉 %d 个凭据头（%s -> %s）",
+            removed,
+            _safe_url(original_url),
+            _safe_url(target_url),
+        )
+    return stripped
 
 
 def backoff_delay(attempt: int, *, base: float = 0.5, cap: float = 8.0) -> float:
@@ -266,22 +326,27 @@ class ProviderHTTP:
             logger.info("地址校验：请求前先过 net 策略（%s）", _safe_url(url))
             await ensure_url_allowed(url, self.policy)
         session = await current_session()
-        current_url = str(url or "")
+        # 记住最初请求的绝对地址：凭据头是否保留始终以它为基准判断
+        original_url = str(url or "")
+        current_url = original_url
         current_method = method
         current_json = json_body
         current_data = data
         for hop in range(_MAX_REDIRECTS + 1):
+            # 每一跳都重算请求头：跨域跳转时凭据头必须剥掉
+            hop_headers = _redirect_headers(original_url, current_url, headers)
             async with session.request(
                 current_method,
                 current_url,
-                headers=headers,
+                headers=hop_headers,
                 json=current_json,
                 data=current_data,
                 timeout=timeout,
-                # 启用策略校验时手动跟跳，才能每一跳都校验；否则保持原有的自动跟随
-                allow_redirects=not enforce_policy,
+                # 始终手动跟跳：自动跟随时既无法逐跳校验地址，
+                # 也无法按 origin 决定哪些凭据头可以继续携带
+                allow_redirects=False,
             ) as response:
-                if enforce_policy and response.status in _REDIRECT_STATUSES:
+                if response.status in _REDIRECT_STATUSES:
                     location = (response.headers.get("Location") or "").strip()
                     if location:
                         current_url = urljoin(current_url, location)
@@ -291,7 +356,8 @@ class ProviderHTTP:
                             _safe_url(current_url),
                         )
                         # 关键：重定向后的地址必须重新校验，不能绕过内网限制
-                        await ensure_url_allowed(current_url, self.policy)
+                        if enforce_policy:
+                            await ensure_url_allowed(current_url, self.policy)
                         if (
                             response.status in _GET_REDIRECT_STATUSES
                             and current_method.upper() != "HEAD"
@@ -333,13 +399,23 @@ class ProviderHTTP:
         raise RuntimeError(f"接口重定向次数过多（超过 {_MAX_REDIRECTS} 次）")
 
     async def download_image(
-        self, url: str, *, follow_redirects: bool = False
+        self,
+        url: str,
+        *,
+        follow_redirects: bool = False,
+        headers: dict[str, str] | None = None,
     ) -> bytes:
-        """下载图片；follow_redirects 为真时手动跟跳并逐跳校验地址。"""
+        """下载图片；follow_redirects 为真时手动跟跳并逐跳校验地址。
+
+        headers 里的凭据头只在仍与最初地址同 origin 的跳转中保留，
+        一旦重定向到别的主机就会被剥掉。
+        """
         timeout = self._request_timeout()
         started = time.monotonic()
         logger.info("下载图片：%s", _safe_url(url))
         current_url = str(url or "").strip()
+        # 与 request_json 一致：凭据头是否保留以最初请求的地址为基准
+        original_url = current_url
         # 首跳先校验：非法地址不建会话、不发请求
         logger.info("地址校验：第 1 跳 %s", _safe_url(current_url))
         await ensure_url_allowed(current_url, self.policy)
@@ -350,8 +426,13 @@ class ProviderHTTP:
                 # 后续每一跳都单独校验，重定向不能把请求带到内网
                 logger.info("地址校验：第 %d 跳 %s", hop + 1, _safe_url(current_url))
                 await ensure_url_allowed(current_url, self.policy)
+            # 每一跳都重算请求头：跨域跳转时凭据头必须剥掉
+            hop_headers = _redirect_headers(original_url, current_url, headers)
             async with session.get(
-                current_url, allow_redirects=False, timeout=timeout
+                current_url,
+                allow_redirects=False,
+                timeout=timeout,
+                headers=hop_headers,
             ) as response:
                 # 连上之后再核对一次对端地址，挡住解析结果被换掉的情况
                 await ensure_peer_allowed(response, current_url, self.policy)

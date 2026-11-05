@@ -430,6 +430,25 @@ class ImageStore:
         self._execute("DELETE FROM images WHERE id = ?", (image_id,))
         self._remove_files(image_id, path)
 
+    def _delete_many(self, rows: list[tuple[str, str]]) -> None:
+        """Drop a whole batch in one transaction, then clear their files.
+
+        Cleanup can remove dozens of rows at once; committing per row turns
+        that into dozens of fsyncs on the event loop.
+        """
+        rows = [(str(image_id), str(path)) for image_id, path in rows]
+        if not rows:
+            return
+        placeholders = ", ".join("?" for _ in rows)
+        with self._lock:
+            self._db.execute(
+                f"DELETE FROM images WHERE id IN ({placeholders})",
+                tuple(image_id for image_id, _ in rows),
+            )
+            self._db.commit()
+        for image_id, path in rows:
+            self._remove_files(image_id, path)
+
     def _remove_files(self, image_id: str, path: str) -> None:
         for target in (path, self.thumb_path(image_id), self.preview_path(image_id)):
             try:
@@ -450,6 +469,10 @@ class ImageStore:
         return True
 
     async def cleanup(self) -> None:
+        """Run the sweep off the event loop; file deletes and fsyncs add up."""
+        await asyncio.to_thread(self.cleanup_sync)
+
+    def cleanup_sync(self) -> None:
         """Apply the time rule first, then the capacity rule, per bucket.
 
         Images, selfies and videos each have their own budget, so a selfie
@@ -477,8 +500,7 @@ class ImageStore:
                     f"AND kind IN ({placeholders}) AND created_at < ?",
                     (*kinds, cutoff),
                 ).fetchall()
-                for image_id, path in rows:
-                    self._delete_row(image_id, path)
+                self._delete_many(rows)
                 if rows:
                     logger.info(
                         "[aiimg] 画廊清理：%d 个%s超过 %d 天，已删除",
@@ -492,8 +514,7 @@ class ImageStore:
                     kinds,
                 ).fetchall()
                 overflow = rows[max_count:]
-                for image_id, path in overflow:
-                    self._delete_row(image_id, path)
+                self._delete_many(overflow)
                 if overflow:
                     logger.info(
                         "[aiimg] 画廊清理：%s超出 %d 个上限，删掉最早 %d 个",

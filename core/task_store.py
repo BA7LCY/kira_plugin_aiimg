@@ -8,10 +8,12 @@ inspected, which is the point of the no-hidden-prompts policy.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 import secrets
 import sqlite3
+import threading
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -100,6 +102,8 @@ class TaskRecord:
     extra: dict = field(default_factory=dict)
     owner: str = ""  # instance id currently executing the task
     lease_until: float = 0.0  # lease deadline, epoch seconds
+    delivery_state: str = ""  # "" | sent | partial | failed | unknown
+    delivery_attempts: int = 0
     attempts: int = 0  # how often the task has been claimed
 
     def to_dict(self) -> dict:
@@ -125,6 +129,8 @@ class TaskRecord:
             "owner": self.owner,
             "lease_until": self.lease_until,
             "attempts": self.attempts,
+            "delivery_state": self.delivery_state,
+            "delivery_attempts": self.delivery_attempts,
         }
 
     @classmethod
@@ -152,6 +158,10 @@ class TaskRecord:
             owner=row["owner"] if "owner" in keys else "",
             lease_until=float(row["lease_until"]) if "lease_until" in keys else 0.0,
             attempts=int(row["attempts"]) if "attempts" in keys else 0,
+            delivery_state=row["delivery_state"] if "delivery_state" in keys else "",
+            delivery_attempts=(
+                int(row["delivery_attempts"]) if "delivery_attempts" in keys else 0
+            ),
         )
 
 
@@ -170,17 +180,42 @@ _STATE_ALIASES: dict[str, tuple[str, ...]] = {
 }
 
 
+def _serialized(method):
+    """把同步的数据库读写串行化到一把线程锁上。
+
+    后台清理走 asyncio.to_thread，会在另一个线程里用同一个连接，
+    没有串行化就可能撞车；这里用可重入锁，同一线程里
+    create→upsert、set_status→get+upsert 这类嵌套调用不会把自己锁死。
+    """
+
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        with self._db_lock:
+            return method(self, *args, **kwargs)
+
+    return wrapper
+
+
 class TaskStore:
-    #: Lease columns added after 0.3.4; old files get them via ALTER TABLE.
+    #: Columns added after the first release; old files get them via ALTER TABLE.
     _LEASE_COLUMNS: tuple[tuple[str, str], ...] = (
         ("owner", "TEXT NOT NULL DEFAULT ''"),
         ("lease_until", "REAL NOT NULL DEFAULT 0"),
         ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("delivery_state", "TEXT NOT NULL DEFAULT ''"),
+        ("delivery_attempts", "INTEGER NOT NULL DEFAULT 0"),
     )
 
     def __init__(self, data_dir: Path):
         self._path = Path(data_dir) / "tasks.sqlite3"
-        self._db = sqlite3.connect(str(self._path), timeout=5.0)
+        # 线程锁要在连接之前建好：下面初始化 schema 时就会用到。
+        self._db_lock = threading.RLock()
+        # check_same_thread=False：后台清理由 asyncio.to_thread 在别的线程里
+        # 调用 prune_old，默认的线程检查会直接抛 ProgrammingError；
+        # 并发安全由上面的 _db_lock 串行化保证。
+        self._db = sqlite3.connect(
+            str(self._path), timeout=5.0, check_same_thread=False
+        )
         self._db.row_factory = sqlite3.Row
         # Autocommit: every statement commits on its own, so a second process
         # opening the same file never waits on a transaction we forgot to close.
@@ -239,7 +274,9 @@ class TaskStore:
                 extra TEXT NOT NULL DEFAULT '{}',
                 owner TEXT NOT NULL DEFAULT '',
                 lease_until REAL NOT NULL DEFAULT 0,
-                attempts INTEGER NOT NULL DEFAULT 0
+                attempts INTEGER NOT NULL DEFAULT 0,
+                delivery_state TEXT NOT NULL DEFAULT '',
+                delivery_attempts INTEGER NOT NULL DEFAULT 0
             )
             """
         )
@@ -265,6 +302,7 @@ class TaskStore:
             self._lock = asyncio.Lock()
         return self._lock
 
+    @_serialized
     def close(self) -> None:
         try:
             self._db.close()
@@ -272,6 +310,7 @@ class TaskStore:
             pass
         logger.debug("任务库已关闭：%s", self._path)
 
+    @_serialized
     def create(
         self,
         *,
@@ -308,6 +347,7 @@ class TaskStore:
         )
         return record
 
+    @_serialized
     def upsert(self, record: TaskRecord) -> None:
         self._db.execute(
             """
@@ -315,8 +355,9 @@ class TaskStore:
                 task_id, kind, sid, session_type, user_id, prompt, provider,
                 status, result, error, created_at, started_at, finished_at,
                 chain, prompt_layers, final_prompt, size, extra,
-                owner, lease_until, attempts
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                owner, lease_until, attempts,
+                delivery_state, delivery_attempts
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(task_id) DO UPDATE SET
                 kind=excluded.kind, sid=excluded.sid,
                 session_type=excluded.session_type, user_id=excluded.user_id,
@@ -327,7 +368,9 @@ class TaskStore:
                 prompt_layers=excluded.prompt_layers,
                 final_prompt=excluded.final_prompt, size=excluded.size,
                 extra=excluded.extra, owner=excluded.owner,
-                lease_until=excluded.lease_until, attempts=excluded.attempts
+                lease_until=excluded.lease_until, attempts=excluded.attempts,
+                delivery_state=excluded.delivery_state,
+                delivery_attempts=excluded.delivery_attempts
             """,
             (
                 record.task_id,
@@ -351,6 +394,8 @@ class TaskStore:
                 _clean_text(record.owner),
                 float(record.lease_until or 0.0),
                 int(record.attempts or 0),
+                str(record.delivery_state or ""),
+                int(record.delivery_attempts or 0),
             ),
         )
         self._db.commit()
@@ -363,12 +408,14 @@ class TaskStore:
             record.owner or "-",
         )
 
+    @_serialized
     def get(self, task_id: str) -> TaskRecord | None:
         row = self._db.execute(
             "SELECT * FROM tasks WHERE task_id = ?", (task_id,)
         ).fetchone()
         return TaskRecord.from_row(row) if row else None
 
+    @_serialized
     def list_recent(
         self,
         *,
@@ -391,6 +438,7 @@ class TaskStore:
         ).fetchall()
         return [TaskRecord.from_row(row) for row in rows]
 
+    @_serialized
     def search_tasks(
         self,
         *,
@@ -425,6 +473,7 @@ class TaskStore:
         ).fetchone()
         return [TaskRecord.from_row(row) for row in rows], int(counted["n"])
 
+    @_serialized
     def list_active(self) -> list[TaskRecord]:
         rows = self._db.execute(
             "SELECT * FROM tasks WHERE status IN ('queued', 'running') "
@@ -432,6 +481,7 @@ class TaskStore:
         ).fetchall()
         return [TaskRecord.from_row(row) for row in rows]
 
+    @_serialized
     def set_status(
         self,
         task_id: str,
@@ -467,6 +517,7 @@ class TaskStore:
         if status != previous:
             logger.info("任务 %s 状态改动：%s → %s", task_id, previous, status)
 
+    @_serialized
     def set_result(self, task_id: str, result: str, *, provider: str = "") -> None:
         record = self.get(task_id)
         if record is None:
@@ -480,6 +531,7 @@ class TaskStore:
         self.upsert(record)
         logger.info("任务 %s 已成功，结果 %d 字符", task_id, len(record.result))
 
+    @_serialized
     def set_error(self, task_id: str, error: str, *, provider: str = "") -> None:
         record = self.get(task_id)
         if record is None:
@@ -493,6 +545,7 @@ class TaskStore:
         self.upsert(record)
         logger.info("任务 %s 已失败：%s", task_id, clip(record.error, 120) or "-")
 
+    @_serialized
     def set_audit(
         self,
         task_id: str,
@@ -514,6 +567,23 @@ class TaskStore:
             "任务 %s 已记录提示词分层 %d 层", task_id, len(record.prompt_layers)
         )
 
+    @_serialized
+    def set_delivery(self, task_id: str, state: str, attempts: int = 0) -> None:
+        """Record how sending the result to the chat went.
+
+        Kept out of ``status`` on purpose: generating an image and getting it
+        into the chat are two different things, and the task page shows both.
+        """
+        self._db.execute(
+            "UPDATE tasks SET delivery_state=?, delivery_attempts=? WHERE task_id=?",
+            (str(state or ""), max(0, int(attempts or 0)), task_id),
+        )
+        self._db.commit()
+        logger.debug(
+            "任务 %s 投递结果：%s，尝试 %d 次", task_id, state or "-", int(attempts or 0)
+        )
+
+    @_serialized
     def cancel(self, task_id: str) -> bool:
         record = self.get(task_id)
         if record is None or record.status not in ("queued", "running"):
@@ -542,26 +612,28 @@ class TaskStore:
         if not owner:
             raise ValueError("owner 不能为空")
         async with self._alock():
-            now = time.time()
-            deadline = now + max(0.0, float(ttl_seconds))
-            cursor = self._db.execute(
-                """
-                UPDATE tasks SET
-                    owner = ?,
-                    lease_until = ?,
-                    attempts = attempts + 1,
-                    status = CASE WHEN status = 'queued' THEN 'running'
-                                  ELSE status END,
-                    started_at = CASE WHEN started_at = 0 THEN ? ELSE started_at END
-                WHERE task_id = ?
-                  AND (status = 'queued'
-                       OR (status = 'running'
-                           AND (owner = '' OR lease_until <= ?)))
-                """,
-                (owner, deadline, int(now), task_id, now),
-            )
-            self._db.commit()
-            won = cursor.rowcount > 0
+            # 线程锁只包住同步的数据库操作，持锁期间不 await
+            with self._db_lock:
+                now = time.time()
+                deadline = now + max(0.0, float(ttl_seconds))
+                cursor = self._db.execute(
+                    """
+                    UPDATE tasks SET
+                        owner = ?,
+                        lease_until = ?,
+                        attempts = attempts + 1,
+                        status = CASE WHEN status = 'queued' THEN 'running'
+                                      ELSE status END,
+                        started_at = CASE WHEN started_at = 0 THEN ? ELSE started_at END
+                    WHERE task_id = ?
+                      AND (status = 'queued'
+                           OR (status = 'running'
+                               AND (owner = '' OR lease_until <= ?)))
+                    """,
+                    (owner, deadline, int(now), task_id, now),
+                )
+                self._db.commit()
+                won = cursor.rowcount > 0
         if won:
             logger.info(
                 "任务 %s 租约已获取：持有者 %s，租约 %d 秒",
@@ -580,14 +652,16 @@ class TaskStore:
         if not owner:
             return False
         async with self._alock():
-            deadline = time.time() + max(0.0, float(ttl_seconds))
-            cursor = self._db.execute(
-                "UPDATE tasks SET lease_until = ? "
-                "WHERE task_id = ? AND owner = ? AND status IN ('queued', 'running')",
-                (deadline, task_id, owner),
-            )
-            self._db.commit()
-            held = cursor.rowcount > 0
+            with self._db_lock:
+                deadline = time.time() + max(0.0, float(ttl_seconds))
+                cursor = self._db.execute(
+                    "UPDATE tasks SET lease_until = ? "
+                    "WHERE task_id = ? AND owner = ? "
+                    "AND status IN ('queued', 'running')",
+                    (deadline, task_id, owner),
+                )
+                self._db.commit()
+                held = cursor.rowcount > 0
         # 续租每隔十几秒一次，只留 debug；队列那边会在第一次续租时说一句。
         logger.debug(
             "任务 %s 续租%s：租约 %d 秒",
@@ -602,13 +676,14 @@ class TaskStore:
         if not owner:
             return
         async with self._alock():
-            cursor = self._db.execute(
-                "UPDATE tasks SET owner = '', lease_until = 0 "
-                "WHERE task_id = ? AND owner = ?",
-                (task_id, owner),
-            )
-            self._db.commit()
-            dropped = cursor.rowcount > 0
+            with self._db_lock:
+                cursor = self._db.execute(
+                    "UPDATE tasks SET owner = '', lease_until = 0 "
+                    "WHERE task_id = ? AND owner = ?",
+                    (task_id, owner),
+                )
+                self._db.commit()
+                dropped = cursor.rowcount > 0
         if dropped:
             logger.info("任务 %s 的租约已释放", task_id)
         else:
@@ -618,11 +693,13 @@ class TaskStore:
         """Running tasks whose lease expired, oldest first."""
         moment = time.time() if now is None else float(now)
         async with self._alock():
-            rows = self._db.execute(
-                "SELECT * FROM tasks WHERE status = 'running' AND lease_until <= ? "
-                "ORDER BY created_at ASC, rowid ASC",
-                (moment,),
-            ).fetchall()
+            with self._db_lock:
+                rows = self._db.execute(
+                    "SELECT * FROM tasks WHERE status = 'running' "
+                    "AND lease_until <= ? "
+                    "ORDER BY created_at ASC, rowid ASC",
+                    (moment,),
+                ).fetchall()
         records = [TaskRecord.from_row(row) for row in rows]
         if records:
             logger.info("发现 %d 个租约已过期的运行中任务", len(records))
@@ -631,19 +708,21 @@ class TaskStore:
     async def bump_attempts(self, task_id: str) -> int:
         """Increment attempts and return the new value (0 for unknown tasks)."""
         async with self._alock():
-            cursor = self._db.execute(
-                "UPDATE tasks SET attempts = attempts + 1 WHERE task_id = ?",
-                (task_id,),
-            )
-            if cursor.rowcount <= 0:
-                return 0
-            row = self._db.execute(
-                "SELECT attempts FROM tasks WHERE task_id = ?", (task_id,)
-            ).fetchone()
-            attempts = int(row["attempts"]) if row else 0
+            with self._db_lock:
+                cursor = self._db.execute(
+                    "UPDATE tasks SET attempts = attempts + 1 WHERE task_id = ?",
+                    (task_id,),
+                )
+                if cursor.rowcount <= 0:
+                    return 0
+                row = self._db.execute(
+                    "SELECT attempts FROM tasks WHERE task_id = ?", (task_id,)
+                ).fetchone()
+                attempts = int(row["attempts"]) if row else 0
         logger.debug("任务 %s 尝试次数 +1，现为 %d 次", task_id, attempts)
         return attempts
 
+    @_serialized
     def count_active_by_user(
         self, user_id: str, kind: str = "", exclude_task_id: str = ""
     ) -> int:
@@ -661,6 +740,7 @@ class TaskStore:
         ).fetchone()
         return int(row["n"] if row else 0)
 
+    @_serialized
     def count_active_by_kind(self, kind: str) -> int:
         row = self._db.execute(
             "SELECT COUNT(*) AS n FROM tasks WHERE kind = ? "
@@ -669,12 +749,14 @@ class TaskStore:
         ).fetchone()
         return int(row["n"] if row else 0)
 
+    @_serialized
     def count_active(self) -> int:
         row = self._db.execute(
             "SELECT COUNT(*) AS n FROM tasks WHERE status IN ('queued', 'running')"
         ).fetchone()
         return int(row["n"] if row else 0)
 
+    @_serialized
     def prune_old(self, retention_hours: int) -> int:
         """Delete finished records older than retention_hours (0 = keep all)."""
         if not retention_hours:
