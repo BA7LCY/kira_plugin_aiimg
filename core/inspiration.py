@@ -63,6 +63,7 @@ def _copy_entry(entry: dict[str, Any]) -> dict[str, Any]:
         "user_id": entry["user_id"],
         "created_at": entry["created_at"],
         "uses": entry["uses"],
+        "promoted": bool(entry.get("promoted")),
     }
 
 
@@ -219,6 +220,7 @@ class InspirationStore:
             "user_id": str(item.get("user_id") or "").strip(),
             "created_at": created_at,
             "uses": _safe_uses(item.get("uses")),
+            "promoted": bool(item.get("promoted")),
         }
 
     def _backup_broken(self, reason: str) -> None:
@@ -341,6 +343,7 @@ class InspirationStore:
                 "user_id": clean_user,
                 "created_at": _now(),
                 "uses": 0,
+                "promoted": False,
             }
             entries.append(entry)
             self._commit(entries)
@@ -446,6 +449,28 @@ class InspirationStore:
             len(pool),
         )
         return [_copy_entry(entry) for entry in result]
+
+    def mark_promoted(self, entry_id: str) -> bool:
+        """把一条标成「已收进预设」；原件保留，只改标记。
+
+        找不到时返回 False。重复标记不算错，直接返回 True。
+        """
+        target = str(entry_id or "")
+        with self._lock:
+            entries = [_copy_entry(entry) for entry in self._entries]
+            for entry in entries:
+                if entry["id"] != target:
+                    continue
+                if entry.get("promoted"):
+                    return True
+                entry["promoted"] = True
+                self._commit(entries)
+                break
+            else:
+                logger.debug("[aiimg] 灵感库：标记收录时没找到 %s", target or "-")
+                return False
+        logger.info("[aiimg] 灵感库：%s 已收进预设", target)
+        return True
 
     def remove(self, entry_id: str) -> bool:
         """按 ID 删除一条；不存在时返回 False。"""

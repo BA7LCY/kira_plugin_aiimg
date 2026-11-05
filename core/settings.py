@@ -451,72 +451,13 @@ CONSOLE_ONLY_FEATURES: dict[str, dict[str, Any]] = {
 }
 
 
-# The console-only prompt fields above moved to their own `section_prompts`
-# card. Older configs still carry their values in `section_features`, and
-# runtime helpers read them from there, so the helpers below migrate and keep
-# a hidden copy until every reader uses the new section.
+# The prompt fields live in their own `section_prompts` card.
 PROMPT_SECTION = "section_prompts"
-LEGACY_PROMPT_KEYS: tuple[str, ...] = (
-    "selfie_prompt_prefix",
-    "selfie_video_frame_template",
-    "ack_notification_prompt",
-    "result_notification_prompt",
-    "draw_presets",
-    "edit_presets",
-    "presets_prompt",
-)
 
 
 def schema() -> dict[str, Any]:
     """Load the on-disk schema; the plugin root is the single source."""
     return json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
-
-
-def _prompt_defaults(definitions: dict[str, Any]) -> dict[str, Any]:
-    fields = (definitions.get(PROMPT_SECTION) or {}).get("fields") or {}
-    return {
-        key: copy.deepcopy((fields.get(key) or {}).get("default"))
-        for key in LEGACY_PROMPT_KEYS
-    }
-
-
-def _adopt_legacy_prompts(
-    config: dict[str, Any], definitions: dict[str, Any]
-) -> None:
-    """Upgrade prompt values saved in section_features to the new card.
-
-    The framework pre-fills a newly added section with defaults, so a blank
-    field, or one still holding its declared default, is taken from the old
-    location. A value the user already edited in the new card always wins.
-    """
-    prompts = config.get(PROMPT_SECTION)
-    features = config.get("section_features")
-    if not isinstance(prompts, dict) or not isinstance(features, dict):
-        return
-    if prompts.get("_prompts_migrated"):
-        return
-    defaults = _prompt_defaults(definitions)
-    migrated = False
-    for key in LEGACY_PROMPT_KEYS:
-        legacy = features.get(key)
-        if not isinstance(legacy, str) or not legacy.strip():
-            continue
-        current = prompts.get(key)
-        if (
-            isinstance(current, str)
-            and current.strip()
-            and current != defaults.get(key)
-        ):
-            continue
-        prompts[key] = legacy
-        migrated = True
-    # One value, one place: the old copy must not linger next to the new card.
-    for key in LEGACY_PROMPT_KEYS:
-        features.pop(key, None)
-    if migrated:
-        # Remember the upgrade: otherwise clearing a field later would look
-        # like an untouched default and the old value would come back.
-        prompts["_prompts_migrated"] = True
 
 
 def field_default(section: str, key: str, fallback: Any = None) -> Any:
@@ -603,7 +544,6 @@ def with_defaults(config: dict | None) -> dict[str, Any]:
     if isinstance(features, dict):
         for name, definition in CONSOLE_ONLY_FEATURES.items():
             features.setdefault(name, copy.deepcopy(definition.get("default")))
-    _adopt_legacy_prompts(result, definitions)
     if not isinstance(result.get("providers"), list):
         result["providers"] = []
     if not isinstance(result.get("chains"), dict):
@@ -979,16 +919,7 @@ def normalize(config: Any) -> dict[str, Any]:
     if not isinstance(config, dict):
         raise ValueError("配置格式不对")
     definitions = sections()
-    # Work on a shallow copy of the two sections involved so a caller's dict is
-    # never touched by the old-to-new prompt upgrade.
     incoming = dict(config)
-    if isinstance(incoming.get(PROMPT_SECTION), dict):
-        incoming[PROMPT_SECTION] = dict(incoming[PROMPT_SECTION])
-    elif incoming.get(PROMPT_SECTION) is None:
-        incoming[PROMPT_SECTION] = {}
-    if isinstance(incoming.get("section_features"), dict):
-        incoming["section_features"] = dict(incoming["section_features"])
-    _adopt_legacy_prompts(incoming, definitions)
     result: dict[str, Any] = {}
     for key, definition in definitions.items():
         values = incoming.get(key)
@@ -1005,16 +936,6 @@ def normalize(config: Any) -> dict[str, Any]:
                 field, item.get("name", field), item.get("type", "string"), value, item
             )
         result[key] = normalized
-
-    # The migration flag is not a schema field, so carry it across saves by hand.
-    prompts = result.get(PROMPT_SECTION)
-    submitted = incoming.get(PROMPT_SECTION)
-    if (
-        isinstance(prompts, dict)
-        and isinstance(submitted, dict)
-        and submitted.get("_prompts_migrated")
-    ):
-        prompts["_prompts_migrated"] = True
 
     # Reference photos are listed from the plugin data directory, so the field
     # exists for layout only and must never reach the stored config: an upload

@@ -5,6 +5,9 @@ __pycache__/
 .pytest_tmp/
 .tmp/
 _tmp/
+_tmp5/
+_t5/
+_t6/
 _compile_check.py
 *.zip
 

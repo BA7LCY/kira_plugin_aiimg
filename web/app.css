@@ -1679,89 +1679,6 @@ table.data .mono {
   font-weight: 600;
 }
 
-/* -- inspirations ------------------------------------------------------ */
-
-.inspo-list {
-  display: flex;
-  flex-direction: column;
-  margin: 0;
-  padding: 0;
-  list-style: none;
-}
-
-.inspo-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 0;
-  border-top: 1px solid var(--line);
-}
-
-.inspo-row:first-child {
-  padding-top: 0;
-  border-top: 0;
-}
-
-.inspo-row:last-child {
-  padding-bottom: 0;
-}
-
-.inspo-main {
-  flex: 1 1 auto;
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.inspo-text {
-  margin: 0;
-  flex: 0 1 auto;
-  min-width: 0;
-  color: var(--ink);
-  font-size: 12.5px;
-  line-height: 1.55;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.inspo-meta {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 6px;
-}
-
-.inspo-tag {
-  background: var(--canvas);
-  color: var(--muted);
-}
-
-.inspo-stat {
-  color: var(--muted);
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-.inspo-del {
-  flex: 0 0 auto;
-  width: 28px;
-  height: 28px;
-  color: var(--muted);
-}
-
-.inspo-del:hover {
-  color: var(--danger);
-  background: var(--danger-soft);
-}
-
-.inspo-del:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
 /* -- first paint ------------------------------------------------------ */
 
 /* Bars where the real content will land. Nothing here is clickable and
@@ -1964,26 +1881,6 @@ html[data-theme="dark"] .startup-banner {
   .table-scroll table.data {
     min-width: 720px;
   }
-
-  /* Narrow columns: one line per idea, so the tags fold away and the
-     sentence keeps the room; the bin stays on its own edge. */
-  .inspo-row {
-    gap: 8px;
-  }
-
-  .inspo-text {
-    font-size: 12px;
-  }
-
-  .inspo-tag,
-  .inspo-stat {
-    display: none;
-  }
-
-  .inspo-del {
-    width: 32px;
-    height: 32px;
-  }
 }
 
 /* Touch screens have no hover, so the star has to be visible all the time.
@@ -2076,6 +1973,12 @@ html[data-theme="dark"] .startup-banner {
   gap: 14px;
   padding: 18px;
   overflow: auto;
+}
+
+.modal-note {
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--muted);
 }
 
 .ref-grid {

@@ -9,6 +9,7 @@ edited or cleared in the settings page.
 from __future__ import annotations
 
 import asyncio
+import copy
 import inspect
 import json
 import time
@@ -3625,6 +3626,7 @@ class AIImagePlugin(BasePlugin):
                 "tags": list(item.get("tags") or []),
                 "uses": int(item.get("uses") or 0),
                 "created_at": int(item.get("created_at") or 0),
+                "promoted": bool(item.get("promoted")),
             }
             for item in items
         ]
@@ -3645,6 +3647,67 @@ class AIImagePlugin(BasePlugin):
             logger.warning("[aiimg] 删除灵感失败：%s", exc)
             return {"ok": False, "error": "删除失败"}
         return {"ok": removed, "id": entry_id}
+
+    @register.api(method="POST", path="/aiimg/inspirations/promote", auth=True, summary="把灵感收进预设")
+    async def api_inspiration_promote(self, payload: dict):
+        """把一条灵感复制进文生图或改图预设，原件保留并标记已收录。"""
+        store = self._inspiration
+        if store is None:
+            return {"ok": False, "error": "灵感库未就绪"}
+        data = payload if isinstance(payload, dict) else {}
+        entry_id = str(data.get("id") or "").strip()
+        if not entry_id:
+            return {"ok": False, "error": "缺少编号"}
+        target = str(data.get("target") or "draw").strip().lower()
+        if target not in ("draw", "edit"):
+            return {"ok": False, "error": "没有这种预设"}
+        field = "draw_presets" if target == "draw" else "edit_presets"
+        item = next(
+            (row for row in store.list(scoped=False, limit=store.limit) if row.get("id") == entry_id),
+            None,
+        )
+        if item is None:
+            return {"ok": False, "error": "这条灵感不见了"}
+        text = str(item.get("text") or "").strip()
+        if not text:
+            return {"ok": False, "error": "这条灵感是空的"}
+        name = str(data.get("name") or "").strip() or text[:10]
+        name = name.replace("\n", " ").replace(":", " ").replace("：", " ").strip()
+        if not name:
+            return {"ok": False, "error": "名字不能为空"}
+        manager = getattr(self.ctx, "plugin_mgr", None)
+        if manager is None:
+            return {"ok": False, "error": "插件管理器没有连接，暂时不能保存"}
+        async with self._config_lock:
+            try:
+                current = manager.get_plugin_config(PLUGIN_ID)
+            except Exception:
+                current = self.plugin_cfg or {}
+            config = copy.deepcopy(current) if isinstance(current, dict) else {}
+            section = config.setdefault("section_prompts", {})
+            if not isinstance(section, dict):
+                section = {}
+                config["section_prompts"] = section
+            existing = str(section.get(field) or "")
+            for line in existing.splitlines():
+                head = line.split(":", 1)[0].split("：", 1)[0].strip()
+                if head and head == name:
+                    return {"ok": False, "error": f"预设里已经有「{name}」了"}
+            added = f"{name}:{text}"
+            section[field] = f"{existing.rstrip()}\n{added}".strip() if existing.strip() else added
+            try:
+                config = settings_mod.normalize(config)
+                updated = await manager.update_plugin_config(PLUGIN_ID, config)
+            except ValueError as exc:
+                logger.warning("[aiimg] 收录进预设被拒：%s", exc)
+                return {"ok": False, "error": str(exc) or "预设格式不对"}
+            except Exception as exc:
+                logger.warning("[aiimg] 收录进预设失败：%s", exc)
+                return {"ok": False, "error": "保存失败"}
+            self.plugin_cfg = updated if isinstance(updated, dict) else config
+        store.mark_promoted(entry_id)
+        logger.info("[aiimg] 灵感 %s 已收进%s预设：%s", entry_id, "文生图" if target == "draw" else "改图", name)
+        return {"ok": True, "id": entry_id, "field": field, "name": name}
 
     @register.api(method="POST", path="/aiimg/tasks/{task_id}/retry", auth=True, summary="重试失败任务")
     async def api_retry_task(self, payload: dict, task_id: str):

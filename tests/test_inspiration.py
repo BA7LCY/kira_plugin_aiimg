@@ -63,7 +63,7 @@ def test_add_and_list_basic(tmp_path):
     assert isinstance(data, list)
     assert len(data) == 2
     assert set(data[0]) == {
-        "id", "text", "tags", "sid", "user_id", "created_at", "uses",
+        "id", "text", "tags", "sid", "user_id", "created_at", "uses", "promoted",
     }
 
     reloaded = InspirationStore(path)
@@ -71,6 +71,25 @@ def test_add_and_list_basic(tmp_path):
     assert _texts(reloaded.list(scoped=False, limit=10)) == {
         "夕阳下的海边", "雨夜便利店",
     }
+
+
+def test_mark_promoted_keeps_the_entry_and_survives_reload(tmp_path):
+    path = tmp_path / "inspiration.json"
+    store = InspirationStore(path)
+    entry = store.add("黄昏的海边，长焦压缩感")
+
+    assert entry["promoted"] is False
+    assert store.mark_promoted(entry["id"]) is True
+    assert store.mark_promoted(entry["id"]) is True
+
+    rows = store.list(scoped=False, limit=5)
+    assert len(rows) == 1
+    assert rows[0]["promoted"] is True
+    assert rows[0]["text"] == entry["text"]
+
+    reloaded = InspirationStore(path)
+    assert reloaded.list(scoped=False, limit=5)[0]["promoted"] is True
+    assert store.mark_promoted("ins-000000") is False
 
 
 def test_empty_text_rejected_and_single_tag_string(tmp_path):

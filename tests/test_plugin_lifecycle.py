@@ -441,17 +441,17 @@ async def test_initialize_survives_missing_queue_numbers(plugin_module, tmp_path
         await plugin.terminate()
 
 
-async def test_initialize_carries_prompt_values_into_the_card(plugin_module, tmp_path):
+async def test_initialize_fills_the_prompt_card_in_place(plugin_module, tmp_path):
     """框架页读的是同一个配置对象，所以启动时就把它归一化到位。"""
     config = _config()
-    config["section_prompts"] = {}
-    config["section_features"]["ack_notification_prompt"] = "旧位置写的接单语"
+    del config["section_prompts"]
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path / "data"), config)
 
     await plugin.initialize()
     try:
-        assert plugin.plugin_cfg["section_prompts"]["ack_notification_prompt"] == "旧位置写的接单语"
-        assert "ack_notification_prompt" not in plugin.plugin_cfg["section_features"]
+        prompts = plugin.plugin_cfg["section_prompts"]
+        assert "draw_presets" in prompts
+        assert prompts["presets_prompt"].strip()
     finally:
         await plugin.terminate()
 
@@ -1630,6 +1630,49 @@ async def test_inspiration_api_lists_and_deletes(plugin_module, tmp_path):
     assert missing == {"ok": False, "error": "缺少编号"}
     assert after["total"] == 1
     assert after["items"][0]["text"] == "雨夜的霓虹街道"
+
+
+async def test_inspiration_promote_copies_into_presets(plugin_module, tmp_path):
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path / "data"), _plan_config(False, False))
+    await plugin.initialize()
+    try:
+        plugin._inspiration.add("雨夜的霓虹街道，湿路反光", sid="s1")
+        entry = (await plugin.api_inspirations())["items"][0]
+        manager = _FakeManager(dict(plugin.plugin_cfg))
+        plugin.ctx.plugin_mgr = manager
+
+        saved = await plugin.api_inspiration_promote(
+            {"id": entry["id"], "name": "雨夜", "target": "draw"}
+        )
+        duplicate = await plugin.api_inspiration_promote(
+            {"id": entry["id"], "name": "雨夜", "target": "draw"}
+        )
+        listed = await plugin.api_inspirations()
+        presets = plugin.plugin_cfg["section_prompts"]["draw_presets"]
+    finally:
+        await plugin.terminate()
+
+    assert saved == {"ok": True, "id": entry["id"], "field": "draw_presets", "name": "雨夜"}
+    assert "雨夜:雨夜的霓虹街道，湿路反光" in presets
+    assert duplicate == {"ok": False, "error": "预设里已经有「雨夜」了"}
+    assert listed["items"][0]["promoted"] is True
+
+
+async def test_inspiration_promote_needs_a_known_entry(plugin_module, tmp_path):
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path / "data"), _plan_config(False, False))
+    await plugin.initialize()
+    try:
+        manager = _FakeManager(dict(plugin.plugin_cfg))
+        plugin.ctx.plugin_mgr = manager
+        missing = await plugin.api_inspiration_promote({"id": "insp-000000"})
+        no_id = await plugin.api_inspiration_promote({})
+        bad_target = await plugin.api_inspiration_promote({"id": "insp-000000", "target": "video"})
+    finally:
+        await plugin.terminate()
+
+    assert missing == {"ok": False, "error": "这条灵感不见了"}
+    assert no_id == {"ok": False, "error": "缺少编号"}
+    assert bad_target == {"ok": False, "error": "没有这种预设"}
 
 
 async def test_edit_image_sends_role_filtered_uploads(plugin_module, tmp_path):

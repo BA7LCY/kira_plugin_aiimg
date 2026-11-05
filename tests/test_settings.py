@@ -146,13 +146,25 @@ def test_info_fields_are_not_written_to_config():
 
 def test_framework_schema_hides_console_only_fields():
     features = S.schema()["section_features"]["fields"]
-    prompts = S.schema()["section_prompts"]["fields"]
 
     assert "selfie_reference_files" not in features
     assert "selfie_include_uploads" not in features
-    assert "ack_notification_prompt" not in features
     assert "selfie_use_persona" in features
-    for key in S.LEGACY_PROMPT_KEYS:
+
+
+def test_prompt_keys_live_only_in_the_prompt_card():
+    features = S.schema()["section_features"]["fields"]
+    prompts = S.schema()["section_prompts"]["fields"]
+
+    for key in (
+        "selfie_prompt_prefix",
+        "selfie_video_frame_template",
+        "ack_notification_prompt",
+        "result_notification_prompt",
+        "draw_presets",
+        "edit_presets",
+        "presets_prompt",
+    ):
         assert key not in features
         assert key in prompts
 
@@ -173,13 +185,20 @@ def test_console_only_fields_follow_the_order_of_the_saved_layout():
     assert keys.index("selfie_follow_edit_chain") < keys.index("selfie_reference_files")
     assert keys.index("selfie_reference_files") < keys.index("selfie_include_uploads")
     assert keys.index("selfie_include_uploads") < keys.index("selfie_use_persona")
-    assert not set(S.LEGACY_PROMPT_KEYS) & set(keys)
 
 
 def test_prompt_card_groups_moved_and_new_fields():
     keys = list(S.sections()["section_prompts"]["fields"])
 
-    assert keys[:7] == list(S.LEGACY_PROMPT_KEYS)
+    assert keys[:7] == [
+        "selfie_prompt_prefix",
+        "selfie_video_frame_template",
+        "ack_notification_prompt",
+        "result_notification_prompt",
+        "draw_presets",
+        "edit_presets",
+        "presets_prompt",
+    ]
     assert keys[7] == "reference_heading"
     assert keys[8:] == [
         "reference_role_persona",
@@ -249,36 +268,23 @@ def test_prompt_values_live_only_in_the_new_card():
     assert "draw_presets" not in out["section_features"]
 
 
-def test_legacy_prompt_values_move_to_the_new_card():
+def test_old_prompt_location_is_ignored():
     config = S.with_defaults({})
-    config["section_features"]["ack_notification_prompt"] = "旧指令"
+    config["section_features"]["ack_notification_prompt"] = "旧位置"
 
-    out = S.normalize(config)
-
-    assert out["section_prompts"]["ack_notification_prompt"] == "旧指令"
-    assert "ack_notification_prompt" not in out["section_features"]
-
-
-def test_clearing_a_prompt_after_migration_stays_cleared():
-    config = S.with_defaults({})
-    config["section_features"]["ack_notification_prompt"] = "旧指令"
-    config = S.normalize(config)
-    assert config["section_prompts"]["_prompts_migrated"] is True
-
-    config["section_prompts"]["ack_notification_prompt"] = ""
     out = S.normalize(config)
 
     assert out["section_prompts"]["ack_notification_prompt"] == ""
     assert "ack_notification_prompt" not in out["section_features"]
 
 
-def test_migration_marker_travels_through_the_page_payload():
-    shown = S.with_defaults({"section_features": {"ack_notification_prompt": "旧指令"}})
-    assert shown["section_prompts"]["ack_notification_prompt"] == "旧指令"
-    assert "ack_notification_prompt" not in shown["section_features"]
+def test_clearing_a_prompt_stays_cleared():
+    config = S.with_defaults({})
+    config["section_prompts"]["ack_notification_prompt"] = "先写一句"
+    config = S.normalize(config)
 
-    shown["section_prompts"]["ack_notification_prompt"] = ""
-    out = S.normalize(shown)
+    config["section_prompts"]["ack_notification_prompt"] = ""
+    out = S.normalize(config)
 
     assert out["section_prompts"]["ack_notification_prompt"] == ""
     assert "ack_notification_prompt" not in out["section_features"]
@@ -306,7 +312,7 @@ def test_framework_schema_keeps_only_the_toggles():
 def test_layout_only_values_stay_out_of_the_saved_config():
     config = S.with_defaults({})
     assert config["section_features"]["selfie_reference_files"] == ""
-    config["section_features"]["draw_presets"] = "手办化:figurine"
+    config["section_prompts"]["draw_presets"] = "手办化:figurine"
 
     out = S.normalize(config)
 

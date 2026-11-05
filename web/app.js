@@ -2979,10 +2979,10 @@ function renderSettings(root) {
         form.append(referenceFilesField(item, values[field], companion));
         continue;
       }
-      form.append(sectionInput(sectionKey, field, item, values[field]));
       if (sectionKey === "section_prompts" && field === "presets_prompt") {
         form.append(inspirationBlock());
       }
+      form.append(sectionInput(sectionKey, field, item, values[field]));
     }
     body.append(form);
     card.append(body);
@@ -2993,25 +2993,17 @@ function renderSettings(root) {
   ensureInspirations();
 }
 
-// -- inspirations: read-only list -------------------------------------
+// -- inspirations: one summary row, edited in the list modal ----------
 
 const INSPIRATION_EMPTY =
-  "还没有存过灵感。聊天里让模型用 save_inspiration 存一条，这里就能看到。";
+  "还没有保存过灵感。聊天里让模型用 save_inspiration 存一条，这里就会出现。";
 
 function inspirationCount() {
   return `共 ${Number(state.inspirations.total || 0)} 条`;
 }
 
-function monthDay(seconds) {
-  const value = Number(seconds || 0);
-  if (!value) return "";
-  const time = new Date(value * 1000);
-  if (Number.isNaN(time.getTime())) return "";
-  return `${time.getMonth() + 1}月${time.getDate()}日`;
-}
-
 function inspirationBlock() {
-  const body = el("div", { class: "card-body", id: "inspirations-body" });
+  const row = el("div", { class: "preset-row", id: "inspirations-body" });
   const wrap = el(
     "div",
     { class: "field wide" },
@@ -3019,50 +3011,26 @@ function inspirationBlock() {
       "div",
       { class: "field-head" },
       el("label", {}, "灵感库"),
-      el("span", { class: "sub", id: "inspirations-count" }, inspirationCount())
+      el("span", { class: "sub", id: "inspirations-count" }, inspirationCount()),
+      el(
+        "button",
+        {
+          class: "btn small ghost",
+          type: "button",
+          id: "inspirations-edit",
+          "data-action": "inspiration-edit",
+        },
+        iconNode("list"),
+        "管理"
+      )
     ),
-    body
+    row
   );
-  fillInspirations(body);
+  fillInspirations(row);
   return wrap;
 }
 
-function inspirationRow(item) {
-  const meta = el("div", { class: "inspo-meta" });
-  for (const tag of Array.isArray(item.tags) ? item.tags : []) {
-    if (!tag) continue;
-    meta.append(el("span", { class: "chip inspo-tag" }, tag));
-  }
-  const uses = Number(item.uses || 0);
-  meta.append(el("span", { class: "inspo-stat" }, uses > 0 ? `用过 ${uses} 次` : "没用过"));
-  const day = monthDay(item.created_at);
-  if (day) meta.append(el("span", { class: "inspo-stat" }, day));
-  const text = String(item.text || "");
-  return el(
-    "li",
-    { class: "inspo-row", "data-inspiration": String(item.id ?? "") },
-    el(
-      "div",
-      { class: "inspo-main" },
-      el("p", { class: "inspo-text", title: text }, text || "（这条没有正文）"),
-      meta
-    ),
-    el(
-      "button",
-      {
-        class: "btn ghost icon-btn inspo-del",
-        type: "button",
-        "data-action": "inspiration-delete",
-        "data-id": String(item.id ?? ""),
-        title: "删除这条灵感",
-        "aria-label": "删除这条灵感",
-      },
-      iconNode("trash")
-    )
-  );
-}
-
-function updateInspirationCount() {
+function updateInspirationActions() {
   const count = $("#inspirations-count");
   if (count) count.textContent = inspirationCount();
 }
@@ -3070,24 +3038,28 @@ function updateInspirationCount() {
 function fillInspirations(box) {
   const body = box || $("#inspirations-body");
   if (!body) return;
-  updateInspirationCount();
+  updateInspirationActions();
   const data = state.inspirations;
   body.replaceChildren();
   if (!data.items.length && data.loading) {
-    body.append(el("p", { class: "empty" }, "正在读取灵感…"));
+    body.append(el("span", { class: "hint" }, "正在读取灵感…"));
     return;
   }
   if (!data.items.length && data.error) {
-    body.append(el("p", { class: "empty" }, `读取灵感失败：${data.error}`));
+    body.append(el("span", { class: "hint" }, `读取灵感失败：${data.error}`));
     return;
   }
   if (!data.items.length) {
-    body.append(el("p", { class: "empty" }, INSPIRATION_EMPTY));
+    body.append(el("span", { class: "hint" }, INSPIRATION_EMPTY));
     return;
   }
-  const list = el("ul", { class: "inspo-list" });
-  for (const item of data.items) list.append(inspirationRow(item));
-  body.append(list);
+  data.items.slice(0, 3).forEach((item) => {
+    const text = String(item.text || "（这条没有正文）");
+    body.append(el("span", { class: "chip", title: text }, shortText(text, 18)));
+  });
+  if (data.items.length > 3) {
+    body.append(el("span", { class: "chip chip-more" }, `+${data.items.length - 3}`));
+  }
 }
 
 function ensureInspirations() {
@@ -3122,27 +3094,168 @@ async function loadInspirations() {
   }
 }
 
-async function deleteInspiration(button) {
-  const id = button?.dataset?.id;
-  if (!id || button.disabled) return;
-  const row = button.closest(".inspo-row");
-  button.disabled = true;
-  try {
-    const answer = await api("/inspirations/delete", {
-      method: "POST",
-      body: JSON.stringify({ id }),
+// 灵感由模型在聊天里保存，这里只负责查看和删除，不给添加入口。
+function openInspirationManager() {
+  const modal = $("#modal");
+  modal.replaceChildren();
+  const card = el("div", { class: "modal-shell narrow" });
+  const countChip = el("span", { class: "chip count" }, `${state.inspirations.items.length} 条`);
+  card.append(
+    el(
+      "div",
+      { class: "modal-head" },
+      el("h3", { class: "modal-title" }, "灵感库"),
+      countChip,
+      el("span", { class: "spacer" }),
+      el(
+        "button",
+        { class: "icon-btn", type: "button", "data-action": "modal-close", title: "关闭" },
+        iconNode("close")
+      )
+    )
+  );
+  const body = el("div", { class: "modal-body" });
+  const grid = el("div", { class: "entry-grid" });
+  body.append(grid);
+
+  const removeEntry = async (item, button) => {
+    button.disabled = true;
+    try {
+      const answer = await api("/inspirations/delete", {
+        method: "POST",
+        body: JSON.stringify({ id: item.id }),
+      });
+      if (answer && answer.ok === false) throw new Error(answer.error || "删除没成功");
+      state.inspirations.items = state.inspirations.items.filter((entry) => entry.id !== item.id);
+      state.inspirations.total = state.inspirations.items.length;
+      paint();
+      fillInspirations();
+    } catch (error) {
+      toast(String(error.message || error), "error");
+      button.disabled = false;
+    }
+  };
+
+  const promoteEntry = (item) => {
+    const text = String(item.text || "");
+    const nameInput = el("input", {
+      class: "input",
+      type: "text",
+      maxlength: "24",
+      value: text.slice(0, 10),
     });
-    if (answer && answer.ok === false) throw new Error(answer.error || "删除没成功");
-    const data = state.inspirations;
-    data.items = data.items.filter((item) => String(item.id) !== String(id));
-    data.total = Math.max(0, Number(data.total || 1) - 1);
-    if (row) row.remove();
-    updateInspirationCount();
-    if (!data.items.length) fillInspirations();
-  } catch (error) {
-    button.disabled = false;
-    toast(String(error.message || error), "error");
-  }
+    const targetSelect = el(
+      "select",
+      { class: "input" },
+      el("option", { value: "draw" }, "文生图预设"),
+      el("option", { value: "edit" }, "改图预设")
+    );
+    const back = el("button", { class: "btn ghost", type: "button" }, "返回");
+    back.addEventListener("click", () => openInspirationManager());
+    const go = el("button", { class: "btn primary", type: "button" }, "收进预设");
+    go.addEventListener("click", async () => {
+      go.disabled = true;
+      try {
+        const answer = await api("/inspirations/promote", {
+          method: "POST",
+          body: JSON.stringify({
+            id: item.id,
+            name: nameInput.value,
+            target: targetSelect.value,
+          }),
+        });
+        if (answer && answer.ok === false) throw new Error(answer.error || "没收进去");
+        applyConfig(await api("/config?lite=1"));
+        state.inspirations.loaded = false;
+        await loadInspirations();
+        closeModal();
+        render();
+        toast("已收进预设", "ok");
+      } catch (error) {
+        toast(String(error.message || error), "error");
+        go.disabled = false;
+      }
+    });
+    body.replaceChildren(
+      el("div", { class: "modal-note" }, `把这条灵感收进预设：${shortText(text, 40)}`),
+      el(
+        "div",
+        { class: "field" },
+        el("label", {}, "预设名字"),
+        nameInput
+      ),
+      el(
+        "div",
+        { class: "field" },
+        el("label", {}, "收到哪里"),
+        targetSelect
+      ),
+      el("div", { class: "modal-actions" }, back, go)
+    );
+  };
+
+  const paint = () => {
+    const items = state.inspirations.items;
+    countChip.textContent = `${items.length} 条`;
+    grid.replaceChildren();
+    if (!items.length) {
+      grid.append(
+        el(
+          "div",
+          { class: "entry-hollow" },
+          el("span", { class: "entry-hollow-title" }, "还没有保存过灵感"),
+          el(
+            "span",
+            { class: "entry-hollow-tip" },
+            "聊天里让模型用 save_inspiration 存一条，这里就能看到；这里只能查看和删除。"
+          )
+        )
+      );
+      return;
+    }
+    items.forEach((item, index) => {
+      const text = String(item.text || "（这条没有正文）");
+      const row = el("div", { class: "entry" });
+      row.append(el("span", { class: "entry-no" }, String(index + 1).padStart(2, "0")));
+      row.append(el("span", { class: "entry-text", title: text }, text));
+      if (item.promoted) row.append(el("span", { class: "chip wait" }, "已收录"));
+      const push = el(
+        "button",
+        { class: "entry-drop", type: "button", title: "收进预设" },
+        iconNode("save")
+      );
+      push.addEventListener("click", () => promoteEntry(item));
+      row.append(push);
+      const drop = el(
+        "button",
+        { class: "entry-drop", type: "button", title: "删除这条灵感" },
+        iconNode("trash")
+      );
+      drop.addEventListener("click", () => void removeEntry(item, drop));
+      row.append(drop);
+      grid.append(row);
+    });
+  };
+
+  body.append(
+    el(
+      "div",
+      { class: "modal-actions" },
+      el("span", { class: "hint" }, "灵感由模型保存，这里只能删除。"),
+      el("span", { class: "spacer" }),
+      el("button", { class: "btn small ghost", type: "button", "data-action": "modal-close" }, "关闭")
+    )
+  );
+  card.append(body);
+  modal.append(card);
+  modal.classList.remove("hidden");
+  card.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    event.stopPropagation();
+    closeModal();
+  });
+  paint();
+  card.querySelector("[data-action='modal-close']")?.focus();
 }
 
 // -- providers: mutations --------------------------------------------
@@ -3329,8 +3442,8 @@ function onViewClick(event) {
       openPresetEditor(button.dataset.section, button.dataset.sectionField);
       return;
     }
-    if (action === "inspiration-delete") {
-      deleteInspiration(button);
+    if (action === "inspiration-edit") {
+      openInspirationManager();
       return;
     }
     if (action === "gallery-delete" || action === "image-delete") {
