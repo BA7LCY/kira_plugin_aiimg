@@ -452,7 +452,7 @@ CONSOLE_ONLY_FEATURES: dict[str, dict[str, Any]] = {
         "type": "textarea",
         "name": "自拍提示词前缀",
         "default": "",
-        "note": "拼在每次自拍描述前面的固定文字，用来固定人物外貌或画风。写一段描述即可，例如：A young woman with long black hair, realistic photo, soft daylight。或者“第三方视角拍摄；严禁对镜自拍，画面中不得出现手机、手机屏幕、镜子、镜面反射、相机、三脚架、其它拍摄设备或相机界面；双手严禁做举手机或拿摄像头的动作。”留空表示只用调用方给的描述。想引用调用方原文，在文字里写 {{prompt}}。",
+        "note": "拼在每次自拍描述前面的固定文字，用来固定人物外貌、画风或拍摄视角。留空表示只用调用方给的描述；写什么就拼什么，不做占位符替换。",
     },
     "selfie_video_frame_template": {
         "type": "textarea",

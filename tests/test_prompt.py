@@ -65,13 +65,14 @@ def test_apply_prefix_keeps_trailing_punctuation():
     assert final == "soft daylight, realistic photo. looking at the camera"
 
 
-def test_apply_prefix_renders_template_token():
+def test_apply_prefix_is_not_a_template():
+    """前缀就是前缀：花括号原样留着，不替换调用方描述。"""
     final, layer = apply_prefix("坐在窗边", "自拍：{{prompt}}，写实风格", name="selfie_prefix")
-    assert final == "自拍：坐在窗边，写实风格"
+    assert final == "自拍：{{prompt}}，写实风格, 坐在窗边"
     assert layer == {
         "name": "selfie_prefix",
         "source": "plugin_config",
-        "text": "自拍：坐在窗边，写实风格",
+        "text": final,
     }
 
 

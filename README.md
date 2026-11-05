@@ -109,9 +109,10 @@
 
 不内置任何隐藏提示词。所有层均可配置：
 
-- 服务商的 `prompt_template`（比如自拍可见模板 `selfie_prompt_template`、视频底图模板 `selfie_video_frame_template`）支持 `{{prompt}}` 占位符；留空表示不追加。
+- 服务商的 `prompt_template` 与自拍转视频底图模板 `selfie_video_frame_template` 支持 `{{prompt}}` 占位符；留空表示不追加。
+- 自拍提示词前缀 `selfie_prompt_prefix` 是一段固定文字，原样拼在描述前面，不做占位符替换。
 - 每个任务都保存 `prompt_layers` 与 `final_prompt` 审计字段，方便回看最终提示词。
-- 完成通知模板 `terminal_notification_prompt` 同样可见可编辑，留空关闭。
+- 结果通知模板 `result_notification_prompt` 同样可见可编辑，留空就只把事实交给模型。
 
 ## WebUI
 

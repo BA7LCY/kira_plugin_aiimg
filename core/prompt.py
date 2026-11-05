@@ -86,19 +86,14 @@ def apply_prefix(
     prefix: str | None,
     name: str = "prefix",
 ) -> tuple[str, dict[str, str] | None]:
-    """Keep the caller's wording and put the configured text in front of it.
+    """Put the configured text in front of the caller's wording.
 
-    With a ``{{prompt}}`` token the text is rendered as a template, so the caller's
-    description can sit anywhere inside it. Without the token the text is simply
-    prepended, which matches how the original plugin treated its selfie prefix.
+    The configured text is used verbatim: it is a prefix, not a template.
     """
     text = str(prefix or "").strip()
     base = str(user_prompt or "").strip()
     if not text:
         return base, None
-    if _TOKEN_RE.search(text):
-        rendered = render_template(text, prompt=base).strip()
-        return rendered, {"name": name, "source": "plugin_config", "text": rendered}
     if not base:
         return text, {"name": name, "source": "plugin_config", "text": text}
     separator = " " if text[-1] in _TRAILING_PUNCT else ", "
