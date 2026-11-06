@@ -74,6 +74,10 @@ def test_image_params_validate_and_default_gif_frames():
         build_image_params(n=11)
     with pytest.raises(ValueError):
         build_image_params(frame_count=1, output_format="gif")
+    with pytest.raises(ValueError):
+        build_image_params(
+            output_format="gif", formats=("png", "jpeg", "webp")
+        )
 
 
 def test_image_params_keep_zero_compression_and_markup():

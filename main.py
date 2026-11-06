@@ -1424,6 +1424,7 @@ class AIImagePlugin(BasePlugin):
         frame_count: int = 9,
         frame_duration_ms: int = 200,
         markup: str = "",
+        formats: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         return build_image_params(
             n=n,
@@ -1436,6 +1437,7 @@ class AIImagePlugin(BasePlugin):
             frame_count=frame_count,
             frame_duration_ms=frame_duration_ms,
             markup=markup,
+            formats=formats,
         )
 
     @register.tool(
@@ -1469,6 +1471,39 @@ class AIImagePlugin(BasePlugin):
                     },
                     "description": "按角色挑参考图：只带上这些角色对应的上传图，可多选；不填则不带上传图",
                 },
+                "n": {
+                    "type": "integer",
+                    "description": "一次改出几张，1 到 10；不填就一张",
+                },
+                "quality": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "auto"],
+                    "description": "画质档位；不填用服务商默认",
+                },
+                "complexity": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                    "description": "画面复杂度，只有部分 2.6 模型支持；不填就不传",
+                },
+                "background": {
+                    "type": "string",
+                    "enum": ["transparent", "opaque", "auto"],
+                    "description": "背景；透明只对 png/webp 有效",
+                },
+                "output_format": {
+                    "type": "string",
+                    "enum": ["png", "jpeg", "webp"],
+                    "description": "输出格式；改图只支持静态图",
+                },
+                "output_compression": {
+                    "type": "integer",
+                    "description": "0 到 100 的压缩率；不填用服务商默认",
+                },
+                "moderation": {
+                    "type": "string",
+                    "enum": ["low", "auto"],
+                    "description": "审核强度；不填用服务商默认",
+                },
                 "markup": {
                     "type": "string",
                     "description": "红笔标注：在图上要改哪里、改成什么，直接写文字；具体位置由模型理解",
@@ -1489,6 +1524,13 @@ class AIImagePlugin(BasePlugin):
         preset: str = "",
         reference_roles: list[str] | None = None,
         markup: str = "",
+        n: int = 1,
+        quality: str = "",
+        complexity: str = "",
+        background: str = "",
+        output_format: str = "",
+        output_compression: int = -1,
+        moderation: str = "",
     ) -> str:
         if not self._ready or not self._gallery:
             return "插件未就绪"
@@ -1553,9 +1595,22 @@ class AIImagePlugin(BasePlugin):
                 str(path.resolve()) for path, _role in extra_refs
             ]
             extra["reference_roles"] = [role for _path, role in extra_refs]
-        clean_markup = str(markup or "").strip()
-        if clean_markup:
-            extra["image_params"] = {"markup": clean_markup[:8000]}
+        try:
+            image_params = self._image_params(
+                n=n,
+                quality=quality,
+                complexity=complexity,
+                background=background,
+                output_format=output_format,
+                output_compression=output_compression,
+                moderation=moderation,
+                markup=markup,
+                formats=("png", "jpeg", "webp"),
+            )
+        except ValueError as exc:
+            return self._denied("edit_image", str(exc))
+        if image_params:
+            extra["image_params"] = image_params
         if preset_name:
             extra["preset"] = preset_name
             extra["preset_text"] = self._preset_map("edit").get(preset_name.lower(), "")
@@ -1600,6 +1655,39 @@ class AIImagePlugin(BasePlugin):
                     },
                     "description": "按角色挑参考图：只带上这些角色对应的上传图，可多选；不填则按插件设置",
                 },
+                "n": {
+                    "type": "integer",
+                    "description": "一次出几张，1 到 10；不填就一张",
+                },
+                "quality": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "auto"],
+                    "description": "画质档位；不填用服务商默认",
+                },
+                "complexity": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                    "description": "画面复杂度，只有部分 2.6 模型支持；不填就不传",
+                },
+                "background": {
+                    "type": "string",
+                    "enum": ["transparent", "opaque", "auto"],
+                    "description": "背景；透明只对 png/webp 有效",
+                },
+                "output_format": {
+                    "type": "string",
+                    "enum": ["png", "jpeg", "webp"],
+                    "description": "输出格式；自拍只支持静态图",
+                },
+                "output_compression": {
+                    "type": "integer",
+                    "description": "0 到 100 的压缩率；不填用服务商默认",
+                },
+                "moderation": {
+                    "type": "string",
+                    "enum": ["low", "auto"],
+                    "description": "审核强度；不填用服务商默认",
+                },
             },
             "required": [],
         },
@@ -1613,6 +1701,13 @@ class AIImagePlugin(BasePlugin):
         aspect_ratio: str = "",
         resolution: str = "",
         reference_roles: list[str] | None = None,
+        n: int = 1,
+        quality: str = "",
+        complexity: str = "",
+        background: str = "",
+        output_format: str = "",
+        output_compression: int = -1,
+        moderation: str = "",
     ) -> str:
         if not self._ready or not self._gallery:
             return "插件未就绪"
@@ -1648,6 +1743,19 @@ class AIImagePlugin(BasePlugin):
         chain = self._selfie_chain()
         if not chain:
             return self._denied("generate_selfie", "没有服务商")
+        try:
+            image_params = self._image_params(
+                n=n,
+                quality=quality,
+                complexity=complexity,
+                background=background,
+                output_format=output_format,
+                output_compression=output_compression,
+                moderation=moderation,
+                formats=("png", "jpeg", "webp"),
+            )
+        except ValueError as exc:
+            return self._denied("generate_selfie", str(exc))
         extra = self._task_extra(
             event,
             explicit=self._explicit(size, aspect_ratio, resolution),
@@ -1656,6 +1764,8 @@ class AIImagePlugin(BasePlugin):
             reference_roles=[role for _path, role in plan],
             chain_items=[self._chain_item_dict(item) for item in chain],
         )
+        if image_params:
+            extra["image_params"] = image_params
         record = self._store.create(
             kind="generate_selfie",
             sid=event.sid,

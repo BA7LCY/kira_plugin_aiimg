@@ -110,7 +110,7 @@
 
 ## 出图参数
 
-一次生成多张用 `n`（1–10），单张用默认值 1。还可以给 `quality`、`complexity`、`background`、`output_format`、`output_compression`、`moderation`；`markup` 用来传红笔标注图。
+一次生成多张用 `n`（1–10），单张用默认值 1。还可以给 `quality`、`complexity`、`background`、`output_format`、`output_compression`、`moderation`；`markup` 用来传红笔标注图。文生图、自拍、改图都能用这些参数；自拍和改图只支持 png、jpeg、webp，GIF/SVG 只走文生图。
 
 - GIF：`output_format="gif"`，默认 9 帧、200 毫秒一帧；帧数 2–64，间隔 20–2000 毫秒。超过 16 帧会在日志里提示。
 - SVG：`output_format="svg"`，只能出 1 张。只认 `<?xml` 或 `<svg` 开头的真实矢量内容；服务商拿 PNG 顶替会直接报「服务商没有返回 SVG」，不会把这家服务商记成失败。

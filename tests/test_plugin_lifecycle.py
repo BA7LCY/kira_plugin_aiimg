@@ -1488,7 +1488,12 @@ async def test_generate_selfie_filters_uploads_by_role(plugin_module, tmp_path):
     plugin._selfie_chain = lambda: [plugin_module.ChainItem(provider_id="p1")]
     try:
         ack = await plugin.generate_selfie(
-            _tool_event(), prompt="坐在窗边", reference_roles=["clothing"]
+            _tool_event(),
+            prompt="坐在窗边",
+            reference_roles=["clothing"],
+            n=2,
+            quality="high",
+            output_format="webp",
         )
     finally:
         await plugin.terminate()
@@ -1496,6 +1501,11 @@ async def test_generate_selfie_filters_uploads_by_role(plugin_module, tmp_path):
     assert json.loads(ack)["status"] == "accepted"
     assert captured[0].extra["reference_images"] == [str(clothing.resolve())]
     assert captured[0].extra["reference_roles"] == ["clothing"]
+    assert captured[0].extra["image_params"] == {
+        "n": 2,
+        "quality": "high",
+        "output_format": "webp",
+    }
 
 
 async def test_generate_selfie_rejects_unknown_roles(plugin_module, tmp_path):
@@ -1633,7 +1643,14 @@ async def test_edit_image_sends_role_filtered_uploads(plugin_module, tmp_path):
     plugin._resolve_input_image = fake_input
     try:
         ack = await plugin.edit_image(
-            _tool_event(), prompt="换成红色", image="given", reference_roles=["style"]
+            _tool_event(),
+            prompt="换成红色",
+            image="given",
+            reference_roles=["style"],
+            n=2,
+            quality="low",
+            background="transparent",
+            output_format="webp",
         )
     finally:
         await plugin.terminate()
@@ -1641,6 +1658,12 @@ async def test_edit_image_sends_role_filtered_uploads(plugin_module, tmp_path):
     assert json.loads(ack)["status"] == "accepted"
     assert captured[0].extra["reference_images"] == [str(style.resolve())]
     assert captured[0].extra["reference_roles"] == ["style"]
+    assert captured[0].extra["image_params"] == {
+        "n": 2,
+        "quality": "low",
+        "background": "transparent",
+        "output_format": "webp",
+    }
 
 
 async def test_edit_image_rejects_more_than_eight_references(plugin_module, tmp_path):

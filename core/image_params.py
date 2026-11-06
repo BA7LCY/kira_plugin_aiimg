@@ -21,6 +21,7 @@ def build_image_params(
     frame_count: int = 9,
     frame_duration_ms: int = 200,
     markup: str = "",
+    formats: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Validate the optional image knobs once, then pass them to the backend."""
     try:
@@ -32,6 +33,8 @@ def build_image_params(
     fmt = str(output_format or "").strip().lower().replace("jpg", "jpeg")
     if fmt and fmt not in ("png", "jpeg", "webp", "gif", "svg"):
         raise ValueError("输出格式只能是 png、jpeg、webp、gif 或 svg")
+    if fmt and formats and fmt not in formats:
+        raise ValueError("这个工具只支持 png、jpeg 或 webp 格式")
     quality = str(quality or "").strip().lower()
     if quality and quality not in ("low", "medium", "high", "auto"):
         raise ValueError("画质只能是 low、medium、high 或 auto")

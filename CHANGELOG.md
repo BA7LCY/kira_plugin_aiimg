@@ -1,5 +1,12 @@
 # 更新日志
 
+## v0.5.1（2026-11-07）
+
+### 新增
+
+- 自拍和改图也能带出图参数：`n`、`quality`、`complexity`、`background`、`output_format`、`output_compression`、`moderation`；改图还可以用 `markup` 写红笔标注。两种工具只支持 png、jpeg、webp，GIF/SVG 仍只走生成。
+- 参数不合法时在入队前回中文原因，不创建任务。
+
 ## v0.5.0（2026-11-07）
 
 ### 新增
