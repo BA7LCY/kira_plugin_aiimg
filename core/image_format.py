@@ -8,6 +8,39 @@ import io
 import re
 
 
+def looks_like_svg(image_bytes: bytes) -> bool:
+    """True only for a real SVG document with an <svg> root element."""
+    data = (image_bytes or b"").lstrip()
+    if not data or (b"<svg" not in data[:2048] and not data.startswith(b"<?xml")):
+        return False
+    try:
+        from xml.etree import ElementTree
+
+        root = ElementTree.fromstring(data)
+    except Exception:
+        return False
+    return str(root.tag).rsplit("}", 1)[-1].lower() == "svg"
+
+
+def validate_svg_bytes(data: bytes, max_bytes: int | None = None) -> None:
+    """Accept generated SVG only when it is plain vector markup.
+
+    A generated file is still untrusted input: scripts and event handlers are
+    refused so opening a gallery file cannot run code in the Kira page.
+    """
+    cap = max_bytes if max_bytes else 24 * 1024 * 1024
+    if not data:
+        raise ValueError("SVG 内容为空")
+    if len(data) > cap:
+        raise ValueError(f"SVG 超过 {cap // (1024 * 1024)} MB")
+    if not looks_like_svg(data):
+        raise ValueError("返回内容不是有效的 SVG")
+    lowered = data.lower()
+    for marker in (b"<script", b"onload=", b"onclick=", b"javascript:"):
+        if marker in lowered:
+            raise ValueError("SVG 里含有脚本，不能保存")
+
+
 def guess_image_mime_and_ext(image_bytes: bytes) -> tuple[str, str]:
     """Return a best-effort MIME type and extension from magic bytes."""
     data = image_bytes or b""
@@ -19,6 +52,8 @@ def guess_image_mime_and_ext(image_bytes: bytes) -> tuple[str, str]:
         return "image/gif", "gif"
     if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
         return "image/webp", "webp"
+    if looks_like_svg(data):
+        return "image/svg+xml", "svg"
     return "image/jpeg", "jpg"
 
 
@@ -27,13 +62,22 @@ MAX_PIXELS = 50_000_000
 
 
 def validate_image_bytes(
-    data: bytes, max_bytes: int | None = None, *, max_pixels: int = MAX_PIXELS
+    data: bytes,
+    max_bytes: int | None = None,
+    *,
+    max_pixels: int = MAX_PIXELS,
+    allow_svg: bool = False,
 ) -> None:
     cap = max_bytes if max_bytes else 24 * 1024 * 1024
     if not data:
         raise ValueError("图片内容为空")
     if len(data) > cap:
         raise ValueError(f"图片超过 {cap // (1024 * 1024)} MB")
+    if looks_like_svg(data):
+        if not allow_svg:
+            raise ValueError("返回内容不是位图图片")
+        validate_svg_bytes(data, cap)
+        return
     try:
         from PIL import Image as PILImage
 

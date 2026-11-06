@@ -49,6 +49,7 @@ from .core.delivery import (
 from .core.http import close_http, current_session
 from .core.image_store import ImageStore
 from .core.image_format import validate_image_bytes
+from .core.image_params import build_image_params
 from .core.memory import ImageMemory
 from .core.logbook import clip, elapsed_ms, mask
 from .core.net import URLFetchPolicy, ensure_url_allowed, origin, trusted_origins_from_config
@@ -64,7 +65,7 @@ from .core.prompt import reference_note, render_template
 from .core import refbridge
 from .core.provider_registry import ProviderRegistry
 from .core.provider_stats import ProviderStats
-from .core.providers.base import StopProviderChain
+from .core.providers.base import FormatMismatchError, StopProviderChain
 from .core.queue import QueueFullError, TaskQueue, UserLimitError
 from .core.task_store import TaskRecord, TaskStore, new_owner_id
 from .core.video_file import download_video
@@ -192,7 +193,7 @@ def _event_elements_kw(adapter: Any) -> dict:
 def _looks_like_image(data: bytes) -> bool:
     """Require a verified, decodable image rather than a magic prefix."""
     try:
-        validate_image_bytes(data)
+        validate_image_bytes(data, allow_svg=True)
     except ValueError:
         return False
     return True
@@ -1005,6 +1006,7 @@ class AIImagePlugin(BasePlugin):
         preset: str = "",
         preset_text: str = "",
         caller_prompt: str = "",
+        image_params: dict[str, Any] | None = None,
     ) -> str:
         if not self._ready or not self._gallery:
             return "插件未就绪"
@@ -1022,12 +1024,18 @@ class AIImagePlugin(BasePlugin):
             chain = [item for item in chain if item.provider_id == provider]
             if not chain:
                 return f"服务商 {provider} 不可用或不在默认链路中"
+        chain = self._format_chain(chain, image_params)
+        if not chain:
+            wanted = str((image_params or {}).get("output_format") or "").upper()
+            return self._denied(kind, f"没有服务商支持 {wanted}")
         extra = self._task_extra(
             event,
             explicit=self._explicit(size, aspect_ratio, resolution),
             default_output=self._default_output_for(kind),
             chain_items=[self._chain_item_dict(item) for item in chain],
         )
+        if image_params:
+            extra["image_params"] = dict(image_params)
         if preset:
             extra["preset"] = preset
             extra["preset_text"] = preset_text
@@ -1254,6 +1262,51 @@ class AIImagePlugin(BasePlugin):
                     "type": "boolean",
                     "description": "true 时按自拍处理：把 image 当人物参考图，每张都套用自拍提示词前缀",
                 },
+                "n": {
+                    "type": "integer",
+                    "description": "一次出几张，1 到 10；GIF 默认 1，SVG 只能是 1",
+                },
+                "quality": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high", "auto"],
+                    "description": "画质档位；不填用服务商默认",
+                },
+                "complexity": {
+                    "type": "string",
+                    "enum": ["low", "medium", "high"],
+                    "description": "画面复杂度，只有部分 2.6 模型支持；不填就不传",
+                },
+                "background": {
+                    "type": "string",
+                    "enum": ["transparent", "opaque", "auto"],
+                    "description": "背景；透明只对 png/webp 有效",
+                },
+                "output_format": {
+                    "type": "string",
+                    "enum": ["png", "jpeg", "webp", "gif", "svg"],
+                    "description": "输出格式；GIF 只能是会动的图，SVG 是矢量图",
+                },
+                "output_compression": {
+                    "type": "integer",
+                    "description": "0 到 100 的压缩率；不填用服务商默认",
+                },
+                "moderation": {
+                    "type": "string",
+                    "enum": ["low", "auto"],
+                    "description": "审核强度；不填用服务商默认",
+                },
+                "frame_count": {
+                    "type": "integer",
+                    "description": "GIF 帧数，2 到 64，默认 9；只有 output_format=gif 时有效",
+                },
+                "frame_duration_ms": {
+                    "type": "integer",
+                    "description": "GIF 每帧毫秒，20 到 2000，默认 200；只有 output_format=gif 时有效",
+                },
+                "markup": {
+                    "type": "string",
+                    "description": "红笔标注：要改哪里、改成什么，直接写文字描述",
+                },
             },
             "required": [],
         },
@@ -1272,7 +1325,32 @@ class AIImagePlugin(BasePlugin):
         brief: str = "",
         image: str = "",
         selfie: bool = False,
+        n: int = 1,
+        quality: str = "",
+        complexity: str = "",
+        background: str = "",
+        output_format: str = "",
+        output_compression: int = -1,
+        moderation: str = "",
+        frame_count: int = 9,
+        frame_duration_ms: int = 200,
+        markup: str = "",
     ) -> str:
+        try:
+            image_params = self._image_params(
+                n=n,
+                quality=quality,
+                complexity=complexity,
+                background=background,
+                output_format=output_format,
+                output_compression=output_compression,
+                moderation=moderation,
+                frame_count=frame_count,
+                frame_duration_ms=frame_duration_ms,
+                markup=markup,
+            )
+        except ValueError as exc:
+            return self._denied("generate_image", str(exc))
         if self._wants_batch(prompts, brief, count, image, selfie):
             return await self._queue_batch_task(
                 event,
@@ -1286,6 +1364,7 @@ class AIImagePlugin(BasePlugin):
                 resolution=resolution,
                 image=image,
                 selfie=selfie,
+                image_params=image_params,
             )
         if not str(prompt or "").strip():
             return self._denied("generate_image", "没有提示词")
@@ -1296,6 +1375,7 @@ class AIImagePlugin(BasePlugin):
             event, "generate_image", prompt=prompt, provider=provider,
             size=size, aspect_ratio=aspect_ratio, resolution=resolution,
             preset=preset_name, preset_text=preset_text, caller_prompt=caller_prompt,
+            image_params=image_params,
         )
 
     @staticmethod
@@ -1313,6 +1393,49 @@ class AIImagePlugin(BasePlugin):
             or wanted > 1
             or str(image or "").strip()
             or selfie
+        )
+
+    def _format_chain(self, chain: list[Any], image_params: dict | None) -> list[Any]:
+        """Keep only providers that declared the requested output format."""
+        fmt = str((image_params or {}).get("output_format") or "").strip().lower()
+        if fmt not in ("gif", "svg"):
+            return list(chain)
+        capability = f"supports_{fmt}"
+        kept: list[Any] = []
+        for item in chain:
+            try:
+                provider_settings = self._registry.get_settings(item.provider_id)
+            except KeyError:
+                continue
+            if bool(getattr(provider_settings, capability, False)):
+                kept.append(item)
+        return kept
+
+    @staticmethod
+    def _image_params(
+        *,
+        n: int = 1,
+        quality: str = "",
+        complexity: str = "",
+        background: str = "",
+        output_format: str = "",
+        output_compression: int = -1,
+        moderation: str = "",
+        frame_count: int = 9,
+        frame_duration_ms: int = 200,
+        markup: str = "",
+    ) -> dict[str, Any]:
+        return build_image_params(
+            n=n,
+            quality=quality,
+            complexity=complexity,
+            background=background,
+            output_format=output_format,
+            output_compression=output_compression,
+            moderation=moderation,
+            frame_count=frame_count,
+            frame_duration_ms=frame_duration_ms,
+            markup=markup,
         )
 
     @register.tool(
@@ -1346,6 +1469,10 @@ class AIImagePlugin(BasePlugin):
                     },
                     "description": "按角色挑参考图：只带上这些角色对应的上传图，可多选；不填则不带上传图",
                 },
+                "markup": {
+                    "type": "string",
+                    "description": "红笔标注：在图上要改哪里、改成什么，直接写文字；具体位置由模型理解",
+                },
             },
             "required": ["prompt"],
         },
@@ -1361,6 +1488,7 @@ class AIImagePlugin(BasePlugin):
         resolution: str = "",
         preset: str = "",
         reference_roles: list[str] | None = None,
+        markup: str = "",
     ) -> str:
         if not self._ready or not self._gallery:
             return "插件未就绪"
@@ -1425,6 +1553,9 @@ class AIImagePlugin(BasePlugin):
                 str(path.resolve()) for path, _role in extra_refs
             ]
             extra["reference_roles"] = [role for _path, role in extra_refs]
+        clean_markup = str(markup or "").strip()
+        if clean_markup:
+            extra["image_params"] = {"markup": clean_markup[:8000]}
         if preset_name:
             extra["preset"] = preset_name
             extra["preset_text"] = self._preset_map("edit").get(preset_name.lower(), "")
@@ -1555,6 +1686,7 @@ class AIImagePlugin(BasePlugin):
         resolution: str = "",
         image: str = "",
         selfie: bool = False,
+        image_params: dict[str, Any] | None = None,
     ) -> str:
         if not self._ready or not self._gallery:
             return "插件未就绪"
@@ -1611,6 +1743,10 @@ class AIImagePlugin(BasePlugin):
             chain = [item for item in chain if item.provider_id == provider]
             if not chain:
                 return f"服务商 {provider} 不可用或不在默认链路中"
+        chain = self._format_chain(chain, image_params)
+        if not chain:
+            wanted = str((image_params or {}).get("output_format") or "").upper()
+            return self._denied("generate_image", f"没有服务商支持 {wanted}")
         extra = self._task_extra(
             event,
             explicit=self._explicit(size, aspect_ratio, resolution),
@@ -1618,6 +1754,8 @@ class AIImagePlugin(BasePlugin):
             prompts=prompts,
             chain_items=[self._chain_item_dict(item) for item in chain],
         )
+        if image_params:
+            extra["image_params"] = dict(image_params)
         if photo is not None:
             extra["input_image"] = str(photo)
             logger.info(
@@ -2862,6 +3000,30 @@ class AIImagePlugin(BasePlugin):
         chain_items = record.extra.get("chain_items") or [
             {"provider": p, "output": ""} for p in record.chain
         ]
+        image_params = dict(record.extra.get("image_params") or {})
+        expected_format = str(image_params.get("output_format") or "").strip().lower()
+        if expected_format in ("gif", "svg"):
+            capability = f"supports_{expected_format}"
+            kept = []
+            for item in chain_items:
+                try:
+                    provider_settings = self._registry.get_settings(item["provider"])
+                except KeyError:
+                    continue
+                if bool(getattr(provider_settings, capability, False)):
+                    kept.append(item)
+                else:
+                    logger.info(
+                        "[aiimg] 任务 %s 跳过服务商 %s：没有声明支持 %s",
+                        record.task_id,
+                        item["provider"],
+                        expected_format.upper(),
+                    )
+            if not kept:
+                raise RuntimeError(
+                    f"没有服务商支持 {expected_format.upper()}，请先在服务商里打开这项能力"
+                )
+            chain_items = kept
         last_error = ""
         upcoming = [item["provider"] for item in chain_items]
         logger.info(
@@ -2913,18 +3075,28 @@ class AIImagePlugin(BasePlugin):
                         if fallback:
                             intent = self._parse_intent_text(fallback)
                 final_prompt = record.extra.get("final_prompt") or record.prompt
+                call_extra = dict(image_params) if image_params else None
                 async with self._provider_slot(provider_id):
                     if kind == "edit":
+                        edit_kwargs = {
+                            "intent": intent,
+                            "size_hint": record.size,
+                        }
+                        if call_extra:
+                            edit_kwargs["extra"] = call_extra
                         results = await backend.edit(
                             final_prompt,
                             list(images or []),
-                            intent=intent,
-                            size_hint=record.size,
+                            **edit_kwargs,
                         )
                     else:
-                        results = await backend.generate(
-                            final_prompt, intent=intent, size_hint=record.size
-                        )
+                        generate_kwargs = {
+                            "intent": intent,
+                            "size_hint": record.size,
+                        }
+                        if call_extra:
+                            generate_kwargs["extra"] = call_extra
+                        results = await backend.generate(final_prompt, **generate_kwargs)
                 # HTTP 200 only means the request was accepted; a step counts
                 # as a success only when real image bytes come back.
                 usable = []
@@ -2947,6 +3119,18 @@ class AIImagePlugin(BasePlugin):
                     provider_id, (time.monotonic() - started) * 1000, last_error
                 )
                 break
+            except FormatMismatchError as exc:
+                # The provider is healthy; it just cannot answer this format.
+                # Skipping it must not cool the provider down.
+                last_error = str(exc)
+                logger.warning(
+                    "[aiimg] 任务 %s 服务商 %s 格式不符（%dms）：%s",
+                    record.task_id,
+                    provider_id,
+                    int((time.monotonic() - started) * 1000),
+                    exc,
+                )
+                continue
             except Exception as exc:
                 last_error = str(exc)
                 await self._stats.record_failure(
@@ -3221,6 +3405,8 @@ class AIImagePlugin(BasePlugin):
             facts["caption"] = str(payload["caption"])
         if payload.get("count"):
             facts["count"] = str(payload["count"])
+        elif len(media) > 1:
+            facts["count"] = str(len(media))
         if not elements:
             await self._notify_failure(record)
             return
@@ -3384,6 +3570,13 @@ class AIImagePlugin(BasePlugin):
             if ok:
                 sent += len(chain)
             else:
+                fallback = self._file_elements(chain)
+                if fallback:
+                    total_attempts += 1
+                    ok = await self._safe_send(sid, MessageChain(fallback))
+                    if ok:
+                        sent += len(chain)
+                        continue
                 logger.warning(
                     "[aiimg] 第 %d/%d 条没发出去（%d 个元素）",
                     index,
@@ -3391,6 +3584,24 @@ class AIImagePlugin(BasePlugin):
                     len(chain),
                 )
         return sent == len(elements), total_attempts
+
+    @staticmethod
+    def _file_elements(chain: list[Any]) -> list[Any]:
+        """Last-resort send shape for files the image element cannot carry."""
+        try:
+            from core.chat.message_elements import File
+        except Exception:
+            return []
+        out: list[Any] = []
+        for element in chain:
+            path = str(getattr(element, "file", "") or "")
+            if not path:
+                continue
+            try:
+                out.append(File(file=path))
+            except Exception:
+                return []
+        return out
 
     def _record_delivery(self, record: TaskRecord, ok: bool, attempts: int) -> None:
         """记住这条任务最后有没有真的送到聊天；只给页面看，不触发重发。"""
@@ -3952,7 +4163,9 @@ class AIImagePlugin(BasePlugin):
         out = []
         for im in images:
             item = {key: value for key, value in im.items() if key != "path"}
-            item["filename"] = Path(im.get("path") or "").name
+            filename = Path(im.get("path") or "").name
+            item["filename"] = filename
+            item["format"] = Path(filename).suffix.lower().lstrip(".")
             out.append(item)
         return {"items": out, "total": total}
 
@@ -3981,6 +4194,8 @@ class AIImagePlugin(BasePlugin):
         if record is None:
             return {"ok": False, "error": "图片不存在"}
         item = {key: value for key, value in record.items() if key != "path"}
+        item["filename"] = Path(str(record.get("path") or "")).name
+        item["format"] = Path(item["filename"]).suffix.lower().lstrip(".")
         return {"ok": True, "item": item}
 
     def _gallery_file(self, image_id: str) -> Path | None:
@@ -4025,6 +4240,16 @@ class AIImagePlugin(BasePlugin):
         path = self._gallery_file(image_id)
         if path is None:
             return {"ok": False, "error": "图片不存在或已清理"}
+        raw = await asyncio.to_thread(path.read_bytes)
+        from .core.image_format import guess_image_mime_and_ext
+
+        mime, _ext = guess_image_mime_and_ext(raw)
+        if mime == "image/svg+xml":
+            return FileResponse(
+                path,
+                media_type=mime,
+                headers={"Cache-Control": "private, max-age=31536000, immutable"},
+            )
         thumb = self._gallery.thumb_path(image_id)
         params = self._gallery.encoding_params()
         if not thumb.is_file():
@@ -4054,6 +4279,16 @@ class AIImagePlugin(BasePlugin):
         path = self._gallery_file(image_id)
         if path is None:
             return {"ok": False, "error": "图片不存在或已清理"}
+        raw = await asyncio.to_thread(path.read_bytes)
+        from .core.image_format import guess_image_mime_and_ext
+
+        mime, _ext = guess_image_mime_and_ext(raw)
+        if mime == "image/svg+xml":
+            return FileResponse(
+                path,
+                media_type=mime,
+                headers={"Cache-Control": "private, max-age=31536000, immutable"},
+            )
         preview = self._gallery.preview_path(image_id)
         params = self._gallery.encoding_params()
         if not preview.is_file():

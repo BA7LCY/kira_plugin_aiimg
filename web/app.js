@@ -1745,11 +1745,18 @@ function galleryTile(image) {
       })
     );
   }
+  const imageFormat = String(image.format || "").toLowerCase();
+  const kindLabel =
+    imageFormat === "gif"
+      ? "动图"
+      : imageFormat === "svg"
+        ? "矢量图"
+        : galleryKindLabel(image.kind);
   tile.append(
     el(
       "div",
       { class: "tile-foot" },
-      el("span", {}, galleryKindLabel(image.kind)),
+      el("span", {}, kindLabel),
       el("span", {}, image.size || ""),
       el("span", { class: "spacer" }),
       el(
@@ -1982,6 +1989,7 @@ function imageDetailNodes(item) {
     ["模型", item.model],
     ["尺寸", item.size],
     ["类型", galleryKindLabel(item.kind)],
+    ["格式", String(item.format || "").toUpperCase()],
     ["创建时间", formatStamp(item.created_at)],
     ["收藏", item.favorite ? "是" : "否"],
     ["文件大小", formatBytes(Number(item.bytes) || 0)],

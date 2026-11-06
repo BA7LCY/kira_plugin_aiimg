@@ -34,7 +34,9 @@ from ..image_format import (
     guess_image_mime_and_ext,
     is_placeholder_image,
     log_size_mismatch,
+    looks_like_svg,
     validate_image_bytes,
+    validate_svg_bytes,
 )
 from ..net import URLFetchPolicy, ensure_url_allowed
 from ..output_spec import (
@@ -50,7 +52,13 @@ from ..sizes import (
     ratio_defaults_from_sizes,
     size_to_ratio,
 )
-from .base import ImageBackend, ImageResult, KeyPoolMixin, ProviderSettings
+from .base import (
+    FormatMismatchError,
+    ImageBackend,
+    ImageResult,
+    KeyPoolMixin,
+    ProviderSettings,
+)
 
 logger = get_logger("provider.compat")
 
@@ -442,11 +450,27 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
         cap = int(getattr(self, "_image_max_bytes", 0) or 0) or (24 * 1024 * 1024)
         if len(data) > cap:
             raise ValueError(f"图片超过 {cap // (1024 * 1024)} MB")
-        validate_image_bytes(data, cap)
         return data
 
+    async def _extract_images(
+        self, resp: dict, model: str, size: str, expected_format: str = ""
+    ) -> list[ImageResult]:
+        """Decode every image in a response, in the order the provider sent them."""
+        items = self._pick_items(resp)
+        if not items:
+            raise RuntimeError("provider response contains no image")
+        results: list[ImageResult] = []
+        for item in items:
+            results.append(await self._extract_item(item, model, size, expected_format))
+        return results
+
     async def _extract_image(self, resp: dict, model: str, size: str) -> ImageResult:
-        item = self._pick_item(resp)
+        results = await self._extract_images(resp, model, size)
+        return results[0]
+
+    async def _extract_item(
+        self, item: dict, model: str, size: str, expected_format: str = ""
+    ) -> ImageResult:
         url = item.get("url") or item.get("image_url")
         b64 = item.get("b64_json")
         raw: bytes | None = None
@@ -454,32 +478,63 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
         # at an internal host, which the download policy must reject.
         if b64:
             try:
-                candidate = base64.b64decode(str(b64))
-                validate_image_bytes(candidate)
-                raw = candidate
+                raw = base64.b64decode(str(b64))
             except Exception:
                 raw = None
         if raw is None and url:
             raw = await self._download(str(url))
         if raw is None:
             raise RuntimeError("provider response contains no image")
-        if is_placeholder_image(raw):
+
+        expected = str(expected_format or "").strip().lower().replace("jpg", "jpeg")
+        cap = int(getattr(self, "_image_max_bytes", 0) or 0) or (24 * 1024 * 1024)
+        is_svg = looks_like_svg(raw)
+        if expected == "svg":
+            if not is_svg:
+                raise FormatMismatchError("服务商没有返回 SVG")
+            validate_svg_bytes(raw, cap)
+        elif is_svg:
+            validate_svg_bytes(raw, cap)
+            if expected:
+                raise FormatMismatchError("服务商没有返回请求的位图格式")
+        else:
+            validate_image_bytes(raw, cap)
+            if expected in ("gif", "png", "jpeg", "webp"):
+                mime, _ext = guess_image_mime_and_ext(raw)
+                wanted_mime = {
+                    "gif": "image/gif",
+                    "png": "image/png",
+                    "jpeg": "image/jpeg",
+                    "webp": "image/webp",
+                }[expected]
+                if mime != wanted_mime:
+                    raise FormatMismatchError(
+                        f"服务商没有返回 {expected.upper()}（实际是 {mime}）"
+                    )
+
+        if not is_svg and is_placeholder_image(raw):
             logger.warning("[OpenAICompat] 服务商返回了占位图（%dB），丢弃", len(raw))
             raise RuntimeError("服务商返回了占位图，无法使用")
-        log_size_mismatch(logger, raw, requested_size=size, source="OpenAICompat")
+        if not is_svg:
+            log_size_mismatch(logger, raw, requested_size=size, source="OpenAICompat")
         mime, ext = guess_image_mime_and_ext(raw)
         return ImageResult(data=raw, mime=mime, ext=ext, size=size, model=model)
 
     # -- async tasks --------------------------------------------------------
 
     @staticmethod
-    def _pick_item(resp: dict) -> dict:
+    def _pick_items(resp: dict) -> list[dict]:
         data = resp.get("data")
         if isinstance(data, dict):
-            return data
-        if isinstance(data, list) and data and isinstance(data[0], dict):
-            return data[0]
-        return {}
+            return [data]
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        return []
+
+    @staticmethod
+    def _pick_item(resp: dict) -> dict:
+        items = OpenAICompatBackend._pick_items(resp)
+        return items[0] if items else {}
 
     def _task_spec(self) -> TaskSpec:
         """Polling dialect for this provider, built once per backend."""
@@ -531,7 +586,9 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
             return explicit
         return build_poll_url(self._task_spec(), self.base_url, task_id)
 
-    async def _await_task(self, resp: dict, key: str, model: str, size: str) -> ImageResult:
+    async def _await_task(
+        self, resp: dict, key: str, model: str, size: str, expected_format: str = ""
+    ) -> ImageResult:
         spec = self._task_spec()
         task_id = self._task_id(resp)
         if not task_id:
@@ -563,7 +620,10 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
             on_status=on_status,
             logger=logger,
         )
-        return await self._extract_image({"data": [item]}, model, size)
+        results = await self._extract_images(
+            {"data": [item]}, model, size, expected_format
+        )
+        return results[0]
 
     # -- generate -----------------------------------------------------------
 
@@ -625,11 +685,11 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
             else:
                 raise
         self._generate_disabled_until = 0.0
+        expected_format = str((extra or {}).get("output_format") or "").strip().lower()
         if self._task_id(resp):
-            result = await self._await_task(resp, key, final_model, final_size)
+            result = await self._await_task(resp, key, final_model, final_size, expected_format)
             return [result]
-        result = await self._extract_image(resp, final_model, final_size)
-        return [result]
+        return await self._extract_images(resp, final_model, final_size, expected_format)
 
     # -- edit ---------------------------------------------------------------
 
@@ -715,11 +775,11 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
             else:
                 raise
         self._edit_disabled_until = 0.0
+        expected_format = str((extra or {}).get("output_format") or "").strip().lower()
         if self._task_id(resp):
-            result = await self._await_task(resp, key, final_model, final_size)
+            result = await self._await_task(resp, key, final_model, final_size, expected_format)
             return [result]
-        result = await self._extract_image(resp, final_model, final_size)
-        return [result]
+        return await self._extract_images(resp, final_model, final_size, expected_format)
 
 
 def _mime_of(data: bytes) -> str:

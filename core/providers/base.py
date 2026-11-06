@@ -37,6 +37,14 @@ class StopProviderChain(Exception):
     """
 
 
+class FormatMismatchError(RuntimeError):
+    """The provider answered, but not in the format the caller asked for.
+
+    Capability mismatches are not provider failures: the chain skips this
+    provider without cooling it down, because the provider itself is healthy.
+    """
+
+
 class KeyPoolMixin:
     """Per-key cooldown shared by all image backends.
 
@@ -103,6 +111,8 @@ class ProviderSettings:
     model: str = ""
     default_size: str = "1024x1024"
     supports_edit: bool = True
+    supports_gif: bool = False
+    supports_svg: bool = False
     extra_body: dict[str, Any] = field(default_factory=dict)
     proxy_url: str = ""
     output_format: str = "jpeg"
