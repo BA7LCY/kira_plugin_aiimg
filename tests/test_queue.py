@@ -92,6 +92,46 @@ def test_runner_cancelled_maps_to_cancelled_status(tmp_path):
     store.close()
 
 
+def test_cancel_interrupts_running_runner_and_keeps_worker(tmp_path):
+    store, q = _queue(tmp_path, max_running=1, max_queued=8)
+
+    async def scenario():
+        await q.start()
+        started = asyncio.Event()
+        interrupted = asyncio.Event()
+        task_id = store.create(kind="generate_image", user_id="u1").task_id
+
+        async def runner(rec):
+            started.set()
+            try:
+                await asyncio.sleep(30)
+            except asyncio.CancelledError:
+                interrupted.set()
+                raise
+            return {"ok": True, "media": ["/x.png"]}
+
+        await q.submit(store.get(task_id), runner)
+        await asyncio.wait_for(started.wait(), 5)
+        assert await q.cancel(task_id) is True
+        await _wait_status(store, task_id, {"cancelled"})
+        assert interrupted.is_set()
+
+        second_id = store.create(kind="generate_image", user_id="u2").task_id
+
+        async def second(rec):
+            return {"ok": True, "media": ["/y.png"]}
+
+        await q.submit(store.get(second_id), second)
+        await _wait_status(store, second_id, {"succeeded"})
+        await q.stop()
+        return task_id, second_id
+
+    task_id, second_id = asyncio.run(scenario())
+    assert store.get(task_id).status == "cancelled"
+    assert store.get(second_id).status == "succeeded"
+    store.close()
+
+
 def test_runner_failure_sets_error(tmp_path):
     store, q = _queue(tmp_path, max_running=1)
 

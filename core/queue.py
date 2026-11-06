@@ -98,6 +98,7 @@ class TaskQueue:
             asyncio.Queue()
         )
         self._workers: list[asyncio.Task] = []
+        self._running: dict[str, asyncio.Task] = {}
         self._retire = 0
         self._on_finished: Callable[[TaskRecord], Awaitable[None]] | None = None
         self._resume: Callable[[TaskRecord], Awaitable[dict]] | None = None
@@ -254,6 +255,12 @@ class TaskQueue:
         if not self._store.cancel(task_id):
             logger.info("取消任务 %s 未生效：任务已结束或不存在", task_id)
             return False
+        running = self._running.get(task_id)
+        if running is not None and not running.done():
+            logger.info("取消任务 %s：正在执行，通知它停下", task_id)
+            running.cancel()
+            # Give the worker a chance to unwind before the caller polls again.
+            await asyncio.sleep(0)
         logger.info("取消任务 %s 已生效", task_id)
         return True
 
@@ -288,7 +295,10 @@ class TaskQueue:
             try:
                 await self._run_one(record, runner)
             except asyncio.CancelledError:
-                raise
+                if self._closed:
+                    raise
+                # 用户取消的是这一条任务，工作线程本身还要继续接活。
+                logger.info("任务 %s 已停下，工作线程继续待命", record.task_id)
             except Exception:
                 logger.exception("工作线程处理任务 %s 时出错", record.task_id)
             finally:
@@ -313,10 +323,18 @@ class TaskQueue:
             )
             return
         fresh = self._store.get(record.task_id) or fresh
+        if fresh.status == "cancelled":
+            logger.info("跳过任务 %s：开始执行前已被取消", record.task_id)
+            await self._finish(fresh)
+            return
         heartbeat = asyncio.create_task(self._heartbeat(record.task_id)) if self._owner else None
+        current = asyncio.current_task()
+        if current is not None:
+            self._running[record.task_id] = current
         try:
             await self._execute(fresh, runner)
         finally:
+            self._running.pop(record.task_id, None)
             if heartbeat is not None:
                 heartbeat.cancel()
                 await asyncio.gather(heartbeat, return_exceptions=True)

@@ -198,6 +198,21 @@ def test_find_filters_by_kind_and_returns_five_fields(tmp_path):
     mem.close()
 
 
+def test_find_filters_by_a_half_open_time_window(tmp_path):
+    mem = _memory(tmp_path)
+    old = mem.remember([str(_touch(tmp_path, "old.png"))], sid="s1", prompt="旧的")[0]
+    new = mem.remember([str(_touch(tmp_path, "new.png"))], sid="s1", prompt="新的")[0]
+    with sqlite3.connect(mem.db_path) as db:
+        db.execute("UPDATE image_refs SET created_at=? WHERE ref=?", (1000.0, old))
+        db.execute("UPDATE image_refs SET created_at=? WHERE ref=?", (2000.0, new))
+
+    assert [row["ref"] for row in mem.find(sid="s1", since=1500.0)] == [new]
+    assert [row["ref"] for row in mem.find(sid="s1", before=1500.0)] == [old]
+    assert [row["ref"] for row in mem.find(sid="s1", since=1000.0, before=2000.0)] == [old]
+    assert [row["ref"] for row in mem.find(sid="s1", since=2001.0)] == []
+    mem.close()
+
+
 # -- 顺序 -------------------------------------------------------------------
 
 

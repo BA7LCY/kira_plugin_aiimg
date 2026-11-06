@@ -400,11 +400,11 @@ async def test_batch_planner_caps_the_count_to_the_batch_limit(plugin_module, tm
     assert "拆成 2 条" in llm.requests[0].messages[0]["content"]
 
 
-async def test_batch_planner_uses_the_configured_template_and_ratio_pool(plugin_module, tmp_path):
+async def test_batch_planner_uses_the_builtin_template_and_ratio_pool(plugin_module, tmp_path):
     reply = json.dumps({"prompts": [{"prompt": "一张", "aspect_ratio": "9:16"}]}, ensure_ascii=False)
     config = _config()
-    config["section_queue"]["planner_prompt"] = "只回 JSON。张数 {{count}}。画幅 {{ratios}}。"
-    config["section_queue"]["planner_ratios"] = "9:16,21:9"
+    config["section_queue"]["planner_prompt"] = "这条设置已经删除，不该再被读取。"
+    config["section_queue"]["planner_ratios"] = "21:9"
     llm = _FakeLLM(reply)
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path, fast_llm=llm), config)
 
@@ -412,8 +412,9 @@ async def test_batch_planner_uses_the_configured_template_and_ratio_pool(plugin_
 
     assert problem == ""
     request = llm.requests[0].messages[0]["content"]
-    assert "张数 2" in request
-    assert "9:16、21:9" in request
+    assert "拆成 2 条" in request
+    assert "1:1、3:4、4:3、16:9、9:16" in request
+    assert "这条设置已经删除" not in request
     assert "需求：夜市" in request
     assert items[0]["output"] == "9:16"
 
@@ -1312,19 +1313,6 @@ def test_ack_text_is_task_facts_without_an_instruction(plugin_module, tmp_path):
     assert "instruction" not in payload
 
 
-def test_ack_prompt_renders_into_the_instruction(plugin_module, tmp_path):
-    config = _config()
-    config["section_prompts"]["ack_notification_prompt"] = "Tell them about {{task_id}}."
-    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
-    record = plugin_module.TaskRecord(
-        task_id="t5", kind="generate_video", sid="s5", status="queued"
-    )
-
-    payload = json.loads(plugin._ack_text(record, "已加入队列"))
-
-    assert payload["instruction"] == "Tell them about t5."
-
-
 def test_denied_returns_facts_instead_of_a_sentence(plugin_module, tmp_path):
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), _config())
 
@@ -1579,7 +1567,7 @@ async def test_generate_image_batch_carries_the_reference_image(plugin_module, t
     plugin._submit = fake_submit
     plugin._image_chain = lambda kind="generate_image": [plugin_module.ChainItem(provider_id="p1")]
     try:
-        ack = await plugin.generate_image_batch(
+        ack = await plugin.generate_image(
             _tool_event(), prompts=["第一张", "第二张"], image=str(photo)
         )
     finally:
@@ -1607,7 +1595,7 @@ async def test_generate_image_batch_prefixes_selfie_prompts(plugin_module, tmp_p
     plugin._submit = fake_submit
     plugin._image_chain = lambda kind="generate_image": [plugin_module.ChainItem(provider_id="p1")]
     try:
-        await plugin.generate_image_batch(
+        await plugin.generate_image(
             _tool_event(), prompts=["看镜头"], image=str(photo), selfie=True
         )
     finally:
@@ -1615,72 +1603,6 @@ async def test_generate_image_batch_prefixes_selfie_prompts(plugin_module, tmp_p
 
     assert captured[0].extra["selfie"] is True
     assert captured[0].extra["prompts"] == ["固定人物，第三人称, 看镜头"]
-
-
-async def test_inspiration_api_lists_and_deletes(plugin_module, tmp_path):
-    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path / "data"), _plan_config(False, False))
-    await plugin.initialize()
-    try:
-        plugin._inspiration.add("雨夜的霓虹街道", tags=["夜", "街景"], sid="s1")
-        plugin._inspiration.add("清晨的窗边", sid="s1")
-        listed = await plugin.api_inspirations()
-        target = listed["items"][0]["id"]
-
-        removed = await plugin.api_inspiration_delete({"id": target})
-        missing = await plugin.api_inspiration_delete({})
-        after = await plugin.api_inspirations()
-    finally:
-        await plugin.terminate()
-
-    assert listed["total"] == 2
-    assert [item["text"] for item in listed["items"]] == ["清晨的窗边", "雨夜的霓虹街道"]
-    assert removed == {"ok": True, "id": target}
-    assert missing == {"ok": False, "error": "缺少编号"}
-    assert after["total"] == 1
-    assert after["items"][0]["text"] == "雨夜的霓虹街道"
-
-
-async def test_inspiration_promote_copies_into_presets(plugin_module, tmp_path):
-    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path / "data"), _plan_config(False, False))
-    await plugin.initialize()
-    try:
-        plugin._inspiration.add("雨夜的霓虹街道，湿路反光", sid="s1")
-        entry = (await plugin.api_inspirations())["items"][0]
-        manager = _FakeManager(dict(plugin.plugin_cfg))
-        plugin.ctx.plugin_mgr = manager
-
-        saved = await plugin.api_inspiration_promote(
-            {"id": entry["id"], "name": "雨夜", "target": "draw"}
-        )
-        duplicate = await plugin.api_inspiration_promote(
-            {"id": entry["id"], "name": "雨夜", "target": "draw"}
-        )
-        listed = await plugin.api_inspirations()
-        presets = plugin.plugin_cfg["section_prompts"]["draw_presets"]
-    finally:
-        await plugin.terminate()
-
-    assert saved == {"ok": True, "id": entry["id"], "field": "draw_presets", "name": "雨夜"}
-    assert "雨夜:雨夜的霓虹街道，湿路反光" in presets
-    assert duplicate == {"ok": False, "error": "预设里已经有「雨夜」了"}
-    assert listed["items"][0]["promoted"] is True
-
-
-async def test_inspiration_promote_needs_a_known_entry(plugin_module, tmp_path):
-    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path / "data"), _plan_config(False, False))
-    await plugin.initialize()
-    try:
-        manager = _FakeManager(dict(plugin.plugin_cfg))
-        plugin.ctx.plugin_mgr = manager
-        missing = await plugin.api_inspiration_promote({"id": "insp-000000"})
-        no_id = await plugin.api_inspiration_promote({})
-        bad_target = await plugin.api_inspiration_promote({"id": "insp-000000", "target": "video"})
-    finally:
-        await plugin.terminate()
-
-    assert missing == {"ok": False, "error": "这条灵感不见了"}
-    assert no_id == {"ok": False, "error": "缺少编号"}
-    assert bad_target == {"ok": False, "error": "没有这种预设"}
 
 
 async def test_edit_image_sends_role_filtered_uploads(plugin_module, tmp_path):
@@ -1995,6 +1917,66 @@ async def test_restart_stops_retrying_a_task_out_of_attempts(plugin_module, tmp_
     assert called == []
 
 
+async def test_cancel_marks_batch_items_and_keeps_worker(plugin_module, tmp_path):
+    data = tmp_path / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    plugin = plugin_module.AIImagePlugin(_Ctx(data), _config())
+    plugin._data_dir = data
+    plugin._store = plugin_module.TaskStore(data)
+    plugin._build_queue()
+    started = asyncio.Event()
+
+    async def hang(record, **kwargs):
+        started.set()
+        await asyncio.sleep(30)
+        return {"media": ["/x.png"]}
+
+    plugin._run_image_chain = hang
+    await plugin._queue.start()
+    record = plugin._store.create(
+        kind="generate_image_batch",
+        user_id="u1",
+        sid="s1",
+        prompt="a",
+        extra={"prompts": ["a", "b", "c"]},
+    )
+    try:
+        await plugin._queue.submit(record, plugin._run_batch)
+        await asyncio.wait_for(started.wait(), 5)
+        assert await plugin._queue.cancel(record.task_id) is True
+
+        deadline = asyncio.get_running_loop().time() + 5
+        items = []
+        while asyncio.get_running_loop().time() < deadline:
+            items = plugin._store.list_items(record.task_id)
+            if items and all(
+                item["state"] in ("done", "failed") for item in items
+            ):
+                break
+            await asyncio.sleep(0.05)
+        assert items
+        assert all(item["state"] in ("done", "failed") for item in items), items
+        assert [item["error"] for item in items if item["state"] == "failed"] == [
+            "任务被取消",
+            "任务被取消",
+            "任务被取消",
+        ]
+
+        # A user cancel must not kill the worker for the next task.
+        async def quick(record, **kwargs):
+            return {"media": ["/y.png"]}
+
+        plugin._run_image_chain = quick
+        second = plugin._store.create(kind="generate_image", user_id="u2", prompt="b")
+        await plugin._queue.submit(second, plugin._run_generate)
+        await _wait_task(plugin._store, second.task_id, {"succeeded"})
+    finally:
+        await plugin._queue.stop()
+
+    assert plugin._store.get(record.task_id).status == "cancelled"
+    assert plugin._store.get(second.task_id).status == "succeeded"
+
+
 def _memory_event(sid: str = "s1"):
     event = _tool_event()
     event.sid = sid
@@ -2104,49 +2086,6 @@ async def test_resend_image_reports_unknown_or_foreign_refs(plugin_module, tmp_p
         await plugin.terminate()
 
 
-async def test_save_inspiration_obeys_the_whitelist(plugin_module, tmp_path):
-    plugin, _ = await _ready_plugin(plugin_module, tmp_path)
-    try:
-        access = plugin.plugin_cfg["section_access"]
-        access["whitelist"] = ["u2"]
-
-        denied = json.loads(
-            await plugin.save_inspiration(_memory_event("s1"), "雨夜霓虹", tags="夜景 街头")
-        )
-        assert denied["status"] == "denied"
-        assert denied["reason"] == "白名单"
-        assert len(plugin._inspiration) == 0
-
-        access["whitelist"] = ""
-        saved = json.loads(
-            await plugin.save_inspiration(_memory_event("s1"), "雨夜霓虹", tags="夜景 街头")
-        )
-        assert saved["status"] == "saved"
-        assert saved["tags"] == ["夜景", "街头"]
-        assert len(plugin._inspiration) == 1
-
-        empty = json.loads(await plugin.save_inspiration(_memory_event("s1"), "   "))
-        assert empty["reason"] == "内容为空"
-    finally:
-        await plugin.terminate()
-
-
-async def test_pick_inspiration_returns_saved_ideas(plugin_module, tmp_path):
-    plugin, _ = await _ready_plugin(plugin_module, tmp_path)
-    try:
-        plugin._inspiration.add("海边灯塔", tags=["海"], sid="s1")
-        plugin._inspiration.add("旧城天台", tags=["城"], sid="s2")
-
-        payload = json.loads(await plugin.pick_inspiration(_memory_event("s1"), count=5))
-
-        assert payload["status"] == "ok"
-        assert payload["count"] == 1
-        assert payload["ideas"][0]["text"] == "海边灯塔"
-        assert payload["ideas"][0]["id"]
-    finally:
-        await plugin.terminate()
-
-
 async def test_hide_unavailable_tools_keeps_read_only_ones(plugin_module, tmp_path):
     plugin, _ = await _ready_plugin(plugin_module, tmp_path)
     try:
@@ -2159,8 +2098,7 @@ async def test_hide_unavailable_tools_keeps_read_only_ones(plugin_module, tmp_pa
         await plugin._hide_unavailable_tools(_memory_event("s1"), req)
 
         assert "generate_image" not in req.tool_set
-        assert "save_inspiration" not in req.tool_set
-        assert {"get_task_status", "resend_image", "find_image", "pick_inspiration"} <= req.tool_set
+        assert req.tool_set == {"resend_image", "find_image"}
     finally:
         await plugin.terminate()
 
@@ -2285,19 +2223,38 @@ async def test_batch_partial_is_marked_on_the_record(plugin_module, tmp_path):
         await plugin.terminate()
 
 
-async def test_saved_inspirations_reach_the_model_each_turn(plugin_module, tmp_path):
-    plugin, _ = await _ready_plugin(plugin_module, tmp_path)
+async def test_find_image_and_resend_image_filter_by_day(plugin_module, tmp_path):
+    plugin, data_dir = await _ready_plugin(plugin_module, tmp_path)
+    photo = _png(data_dir / "out" / "today.png")
+    ref = plugin._memory.remember(
+        [str(photo)], sid="s1", kind="image", prompt="今天的猫"
+    )[0]
+    sent = []
+
+    async def fake_send(sid, chain):
+        sent.append(chain)
+        return True
+
+    plugin._safe_send = fake_send
     try:
-        plugin._inspiration.add("雨夜便利店，霓虹倒影", sid="s1")
-        request = types.SimpleNamespace(system_prompt=[])
+        today = json.loads(await plugin.find_image(_memory_event("s1"), query="猫", days_ago=0))
+        yesterday = json.loads(await plugin.find_image(_memory_event("s1"), query="猫", days_ago=1))
+        bad = json.loads(await plugin.find_image(_memory_event("s1"), date="2026/11/07"))
 
-        await plugin._inject_presets(_memory_event("s1"), request)
-
-        text = "\n".join(prompt.content for prompt in request.system_prompt)
-        assert "雨夜便利店" in text
-        assert "灵感库" in text or plugin._prompts("inspiration_prompt", "")
+        resent = json.loads(await plugin.resend_image(_memory_event("s1"), query="猫", days_ago=0))
+        missing = json.loads(await plugin.resend_image(_memory_event("s1"), query="猫", days_ago=1))
     finally:
         await plugin.terminate()
+
+    assert today["count"] == 1
+    assert today["images"][0]["image_ref"] == ref
+    assert today["images"][0]["created_at"]
+    assert yesterday["count"] == 0
+    assert bad["status"] == "denied"
+    assert bad["reason"] == "日期写成 2026-11-06 这种格式"
+    assert resent == {"status": "resent"}
+    assert len(sent) == 1
+    assert missing == {"status": "missing"}
 
 
 async def test_video_rejects_outside_audio_and_missing_last_frame(plugin_module, tmp_path):

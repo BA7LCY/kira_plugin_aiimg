@@ -2,7 +2,6 @@
 
 import pytest
 
-from core import planner
 from core import prompt as P
 from core import settings as S
 
@@ -159,7 +158,6 @@ def test_prompt_keys_live_only_in_the_prompt_card():
     for key in (
         "selfie_prompt_prefix",
         "selfie_video_frame_template",
-        "ack_notification_prompt",
         "result_notification_prompt",
         "draw_presets",
         "edit_presets",
@@ -190,19 +188,17 @@ def test_console_only_fields_follow_the_order_of_the_saved_layout():
 def test_prompt_card_groups_moved_and_new_fields():
     keys = list(S.sections()["section_prompts"]["fields"])
 
-    assert keys[:8] == [
+    assert keys[:7] == [
         "selfie_prompt_prefix",
         "selfie_video_frame_template",
-        "ack_notification_prompt",
         "result_notification_prompt",
         "draw_presets",
         "edit_presets",
         "video_presets",
         "presets_prompt",
     ]
-    assert keys[8] == "inspiration_prompt"
-    assert keys[9] == "reference_heading"
-    assert keys[10:] == [
+    assert keys[7] == "reference_heading"
+    assert keys[8:] == [
         "reference_role_persona",
         "reference_role_base",
         "reference_role_subject",
@@ -225,15 +221,6 @@ def test_prompt_card_defaults_match_the_prompt_module():
         assert fields[f"reference_role_{role}"]["default"] == text
     assert fields["reference_note_header"]["default"] == P.REFERENCE_NOTE_HEADER
     assert fields["reference_note_footer"]["default"] == P.REFERENCE_NOTE_FOOTER
-
-
-def test_planner_prompt_default_is_the_builtin_template():
-    fields = S.schema()["section_queue"]["fields"]
-
-    assert fields["planner_prompt"]["default"] == planner.DEFAULT_PLANNER_TEMPLATE
-    assert S.field_default("section_queue", "planner_prompt") == (
-        planner.DEFAULT_PLANNER_TEMPLATE
-    )
 
 
 def test_gallery_cleanup_defaults_are_finite():
@@ -268,39 +255,6 @@ def test_prompt_values_live_only_in_the_new_card():
 
     assert out["section_prompts"]["draw_presets"] == "手办化:figurine"
     assert "draw_presets" not in out["section_features"]
-
-
-def test_old_prompt_location_is_ignored():
-    config = S.with_defaults({})
-    config["section_features"]["ack_notification_prompt"] = "旧位置"
-
-    out = S.normalize(config)
-
-    assert out["section_prompts"]["ack_notification_prompt"] == ""
-    assert "ack_notification_prompt" not in out["section_features"]
-
-
-def test_clearing_a_prompt_stays_cleared():
-    config = S.with_defaults({})
-    config["section_prompts"]["ack_notification_prompt"] = "先写一句"
-    config = S.normalize(config)
-
-    config["section_prompts"]["ack_notification_prompt"] = ""
-    out = S.normalize(config)
-
-    assert out["section_prompts"]["ack_notification_prompt"] == ""
-    assert "ack_notification_prompt" not in out["section_features"]
-
-
-def test_a_value_edited_in_the_new_card_beats_the_legacy_copy():
-    config = S.with_defaults({})
-    config["section_features"]["ack_notification_prompt"] = "旧指令"
-    config["section_prompts"]["ack_notification_prompt"] = "新指令"
-
-    out = S.normalize(config)
-
-    assert out["section_prompts"]["ack_notification_prompt"] == "新指令"
-    assert "ack_notification_prompt" not in out["section_features"]
 
 
 def test_framework_schema_keeps_only_the_toggles():

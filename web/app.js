@@ -88,9 +88,6 @@ const state = {
   saving: false,
   polling: 0,
   loadError: "",
-  // Read-only list on the settings page. It is fetched once per visit, kept
-  // here so the card can redraw itself without asking again.
-  inspirations: { items: [], total: 0, loaded: false, loading: false, error: "" },
   // True until the very first load() settles: while it is on, a missing
   // config means "still reading", not "reading failed".
   booting: true,
@@ -1161,6 +1158,8 @@ function taskTable(tasks, withActions) {
             type: "button",
             "data-action": "task-cancel",
             "data-task": task.task_id,
+            title: "停止后续生成；已经发出的请求可能仍会完成",
+            "aria-label": "取消任务",
           },
           "取消"
         )
@@ -3024,283 +3023,12 @@ function renderSettings(root) {
         form.append(referenceFilesField(item, values[field], companion));
         continue;
       }
-      if (sectionKey === "section_prompts" && field === "presets_prompt") {
-        form.append(inspirationBlock());
-      }
       form.append(sectionInput(sectionKey, field, item, values[field]));
     }
     body.append(form);
     card.append(body);
     root.append(card);
   }
-  // One request per visit, not a timer: the list only changes when the chat
-  // stores or the reader deletes something.
-  ensureInspirations();
-}
-
-// -- inspirations: one summary row, edited in the list modal ----------
-
-const INSPIRATION_EMPTY =
-  "还没有保存过灵感。聊天里让模型用 save_inspiration 存一条，这里就会出现。";
-
-function inspirationCount() {
-  return `共 ${Number(state.inspirations.total || 0)} 条`;
-}
-
-function inspirationBlock() {
-  const row = el("div", { class: "preset-row", id: "inspirations-body" });
-  const wrap = el(
-    "div",
-    { class: "field wide" },
-    el(
-      "div",
-      { class: "field-head" },
-      el("label", {}, "灵感库"),
-      el("span", { class: "sub", id: "inspirations-count" }, inspirationCount()),
-      el(
-        "button",
-        {
-          class: "btn small ghost",
-          type: "button",
-          id: "inspirations-edit",
-          "data-action": "inspiration-edit",
-        },
-        iconNode("list"),
-        "管理"
-      )
-    ),
-    row
-  );
-  fillInspirations(row);
-  return wrap;
-}
-
-function updateInspirationActions() {
-  const count = $("#inspirations-count");
-  if (count) count.textContent = inspirationCount();
-}
-
-function fillInspirations(box) {
-  const body = box || $("#inspirations-body");
-  if (!body) return;
-  updateInspirationActions();
-  const data = state.inspirations;
-  body.replaceChildren();
-  if (!data.items.length && data.loading) {
-    body.append(el("span", { class: "hint" }, "正在读取灵感…"));
-    return;
-  }
-  if (!data.items.length && data.error) {
-    body.append(el("span", { class: "hint" }, `读取灵感失败：${data.error}`));
-    return;
-  }
-  if (!data.items.length) {
-    body.append(el("span", { class: "hint" }, INSPIRATION_EMPTY));
-    return;
-  }
-  data.items.slice(0, 3).forEach((item) => {
-    const text = String(item.text || "（这条没有正文）");
-    body.append(el("span", { class: "chip", title: text }, shortText(text, 18)));
-  });
-  if (data.items.length > 3) {
-    body.append(el("span", { class: "chip chip-more" }, `+${data.items.length - 3}`));
-  }
-}
-
-function ensureInspirations() {
-  const data = state.inspirations;
-  if (data.loaded || data.loading) return;
-  loadInspirations();
-}
-
-async function loadInspirations() {
-  const data = state.inspirations;
-  data.loading = true;
-  fillInspirations();
-  try {
-    const answer = await api("/inspirations");
-    const items = Array.isArray(answer.items) ? answer.items : [];
-    // The endpoint may answer 200 with an `error` field instead of a status
-    // code; an empty list is not worth showing as "no ideas yet" when it is
-    // really a read failure.
-    if (answer.error && !items.length) throw new Error(String(answer.error));
-    data.items = items;
-    data.total = Number.isFinite(Number(answer.total)) ? Number(answer.total) : data.items.length;
-    data.error = "";
-  } catch (error) {
-    data.error = String(error.message || error);
-    data.total = data.items.length;
-  } finally {
-    data.loading = false;
-    // Whatever happened, the card is the only thing that changes: the rest of
-    // the form keeps its focus and its scroll.
-    data.loaded = true;
-    fillInspirations();
-  }
-}
-
-// 灵感由模型在聊天里保存，这里只负责查看和删除，不给添加入口。
-function openInspirationManager() {
-  const modal = $("#modal");
-  modal.replaceChildren();
-  const card = el("div", { class: "modal-shell narrow" });
-  const countChip = el("span", { class: "chip count" }, `${state.inspirations.items.length} 条`);
-  card.append(
-    el(
-      "div",
-      { class: "modal-head" },
-      el("h3", { class: "modal-title" }, "灵感库"),
-      countChip,
-      el("span", { class: "spacer" }),
-      el(
-        "button",
-        { class: "icon-btn", type: "button", "data-action": "modal-close", title: "关闭" },
-        iconNode("close")
-      )
-    )
-  );
-  const body = el("div", { class: "modal-body" });
-  const grid = el("div", { class: "entry-grid" });
-  body.append(grid);
-
-  const removeEntry = async (item, button) => {
-    button.disabled = true;
-    try {
-      const answer = await api("/inspirations/delete", {
-        method: "POST",
-        body: JSON.stringify({ id: item.id }),
-      });
-      if (answer && answer.ok === false) throw new Error(answer.error || "删除没成功");
-      state.inspirations.items = state.inspirations.items.filter((entry) => entry.id !== item.id);
-      state.inspirations.total = state.inspirations.items.length;
-      paint();
-      fillInspirations();
-    } catch (error) {
-      toast(String(error.message || error), "error");
-      button.disabled = false;
-    }
-  };
-
-  const promoteEntry = (item) => {
-    const text = String(item.text || "");
-    const nameInput = el("input", {
-      class: "input",
-      type: "text",
-      maxlength: "24",
-      value: text.slice(0, 10),
-    });
-    const targetSelect = el(
-      "select",
-      { class: "input" },
-      el("option", { value: "draw" }, "文生图预设"),
-      el("option", { value: "edit" }, "改图预设")
-    );
-    const back = el("button", { class: "btn ghost", type: "button" }, "返回");
-    back.addEventListener("click", () => openInspirationManager());
-    const go = el("button", { class: "btn primary", type: "button" }, "收进预设");
-    go.addEventListener("click", async () => {
-      go.disabled = true;
-      try {
-        const answer = await api("/inspirations/promote", {
-          method: "POST",
-          body: JSON.stringify({
-            id: item.id,
-            name: nameInput.value,
-            target: targetSelect.value,
-          }),
-        });
-        if (answer && answer.ok === false) throw new Error(answer.error || "没收进去");
-        applyConfig(await api("/config?lite=1"));
-        state.inspirations.loaded = false;
-        await loadInspirations();
-        closeModal();
-        render();
-        toast("已收进预设", "ok");
-      } catch (error) {
-        toast(String(error.message || error), "error");
-        go.disabled = false;
-      }
-    });
-    body.replaceChildren(
-      el("div", { class: "modal-note" }, `把这条灵感收进预设：${shortText(text, 40)}`),
-      el(
-        "div",
-        { class: "field" },
-        el("label", {}, "预设名字"),
-        nameInput
-      ),
-      el(
-        "div",
-        { class: "field" },
-        el("label", {}, "收到哪里"),
-        targetSelect
-      ),
-      el("div", { class: "modal-actions" }, back, go)
-    );
-  };
-
-  const paint = () => {
-    const items = state.inspirations.items;
-    countChip.textContent = `${items.length} 条`;
-    grid.replaceChildren();
-    if (!items.length) {
-      grid.append(
-        el(
-          "div",
-          { class: "entry-hollow" },
-          el("span", { class: "entry-hollow-title" }, "还没有保存过灵感"),
-          el(
-            "span",
-            { class: "entry-hollow-tip" },
-            "聊天里让模型用 save_inspiration 存一条，这里就能看到；这里只能查看和删除。"
-          )
-        )
-      );
-      return;
-    }
-    items.forEach((item, index) => {
-      const text = String(item.text || "（这条没有正文）");
-      const row = el("div", { class: "entry" });
-      row.append(el("span", { class: "entry-no" }, String(index + 1).padStart(2, "0")));
-      row.append(el("span", { class: "entry-text", title: text }, text));
-      if (item.promoted) row.append(el("span", { class: "chip wait" }, "已收录"));
-      const push = el(
-        "button",
-        { class: "entry-drop", type: "button", title: "收进预设" },
-        iconNode("save")
-      );
-      push.addEventListener("click", () => promoteEntry(item));
-      row.append(push);
-      const drop = el(
-        "button",
-        { class: "entry-drop", type: "button", title: "删除这条灵感" },
-        iconNode("trash")
-      );
-      drop.addEventListener("click", () => void removeEntry(item, drop));
-      row.append(drop);
-      grid.append(row);
-    });
-  };
-
-  body.append(
-    el(
-      "div",
-      { class: "modal-actions" },
-      el("span", { class: "hint" }, "灵感由模型保存，这里只能删除。"),
-      el("span", { class: "spacer" }),
-      el("button", { class: "btn small ghost", type: "button", "data-action": "modal-close" }, "关闭")
-    )
-  );
-  card.append(body);
-  modal.append(card);
-  modal.classList.remove("hidden");
-  card.addEventListener("keydown", (event) => {
-    if (event.key !== "Escape") return;
-    event.stopPropagation();
-    closeModal();
-  });
-  paint();
-  card.querySelector("[data-action='modal-close']")?.focus();
 }
 
 // -- providers: mutations --------------------------------------------
@@ -3487,10 +3215,6 @@ function onViewClick(event) {
       openPresetEditor(button.dataset.section, button.dataset.sectionField);
       return;
     }
-    if (action === "inspiration-edit") {
-      openInspirationManager();
-      return;
-    }
     if (action === "gallery-delete" || action === "image-delete") {
       deleteImage(button.dataset.image);
       return;
@@ -3649,7 +3373,11 @@ async function cancelTask(taskId) {
       method: "POST",
       body: JSON.stringify({ task_id: taskId }),
     });
-    toast(data.ok ? "已取消" : "取消没成功，可能刚开始跑");
+    toast(
+      data.ok
+        ? "已停止后续提交；已经发出的请求可能仍会完成"
+        : "停止没成功，可能刚开始跑"
+    );
     loadTasks();
     refreshStatus();
   } catch (error) {
@@ -3810,10 +3538,6 @@ async function route() {
   if (!(await leaveGuard())) {
     if (state.view) location.hash = `#${state.view}`;
     return;
-  }
-  if (state.view === "settings" && next !== "settings") {
-    // Next visit reads the list again; until then the old copy is not reused.
-    state.inspirations.loaded = false;
   }
   state.view = next;
   render();

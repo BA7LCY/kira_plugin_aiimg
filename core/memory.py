@@ -345,6 +345,8 @@ class ImageMemory:
         sid: str = "",
         scoped: bool = True,
         limit: int = 8,
+        since: float | None = None,
+        before: float | None = None,
     ) -> list[dict]:
         """按提示词关键词和类型检索，返回精简字段。
 
@@ -368,6 +370,12 @@ class ImageMemory:
         if scoped and sid:
             clauses.append("sid = ?")
             params.append(str(sid))
+        if since is not None:
+            clauses.append("created_at >= ?")
+            params.append(float(since))
+        if before is not None:
+            clauses.append("created_at < ?")
+            params.append(float(before))
         if clauses:
             sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
