@@ -1117,28 +1117,6 @@ class AIImagePlugin(BasePlugin):
         }
         return runners.get(kind, (self._run_generate, False))
 
-    def _retry_record(
-        self, record: TaskRecord, *, prompts: list[str] | None = None
-    ) -> TaskRecord:
-        """Clone a failed task so it keeps its prompt, chain and parameters."""
-        extra = dict(record.extra or {})
-        # Prompt layers and the final prompt are rebuilt by the runner.
-        for key in ("prompt_layers", "final_prompt"):
-            extra.pop(key, None)
-        if prompts is not None:
-            extra["prompts"] = list(prompts)
-        return self._store.create(
-            kind=record.kind,
-            sid=record.sid,
-            session_type=str(extra.get("session_type") or record.session_type),
-            user_id=record.user_id,
-            prompt=prompts[0] if prompts else record.prompt,
-            provider=record.provider,
-            chain=list(record.chain or []),
-            size=record.size,
-            extra=extra,
-        )
-
     def _ack_text(self, record: TaskRecord, message: str, event: Any = None) -> str:
         """Facts-only acknowledgement; ``message`` is kept for the log only."""
         logger.info("[aiimg] 接单回执 %s：%s", record.task_id, message)
@@ -4178,45 +4156,6 @@ class AIImagePlugin(BasePlugin):
                     row["items"] = items
             tasks.append(row)
         return {"tasks": tasks, "total": total}
-
-    @register.api(method="POST", path="/aiimg/tasks/{task_id}/retry", auth=True, summary="重试失败任务")
-    async def api_retry_task(self, payload: dict, task_id: str):
-        if not self._store or not self._queue:
-            return {"ok": False, "error": "插件未就绪"}
-        data = payload if isinstance(payload, dict) else {}
-        target = str(task_id or data.get("task_id") or "")
-        record = self._store.get(target)
-        if record is None:
-            return {"ok": False, "error": "任务不存在"}
-        only_failed = bool(data.get("only_failed"))
-        items = (
-            self._store.list_items(record.task_id)
-            if record.kind == "generate_image_batch"
-            else []
-        )
-        failed = [item for item in items if item["state"] == "failed"]
-        if only_failed:
-            if not failed:
-                return {"ok": False, "error": "这个任务没有失败的子项"}
-        elif record.status != "failed":
-            return {"ok": False, "error": "只有失败的任务可以重试"}
-        retry = self._retry_record(
-            record,
-            prompts=[item["prompt"] for item in failed] if only_failed else None,
-        )
-        runner, is_batch = self._task_runner(record.kind)
-        try:
-            await self._submit(retry, runner, is_batch=is_batch)
-        except (QueueFullError, UserLimitError) as exc:
-            return {"ok": False, "error": str(exc), "task_id": retry.task_id}
-        if only_failed:
-            logger.info(
-                "[aiimg] 批量任务 %s 重试失败子项 %d 张，新任务 %s",
-                record.task_id,
-                len(failed),
-                retry.task_id,
-            )
-        return {"ok": True, "task_id": retry.task_id, "source": record.task_id}
 
     @register.api(method="GET", path="/aiimg/gallery", auth=True, summary="画廊")
     async def api_gallery(

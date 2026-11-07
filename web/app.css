@@ -864,55 +864,54 @@ table.data .mono {
   color: var(--muted);
 }
 
-.task-table {
-  table-layout: fixed;
+.task-list {
+  display: flex;
+  flex-direction: column;
 }
 
-.task-table th,
-.task-table td {
-  overflow: hidden;
+.task-line {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
 }
 
-.task-table .prompt-cell {
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.task-table .actions-cell {
-  text-align: right;
-}
-
-.task-table .row-actions {
-  flex-wrap: wrap;
-  justify-content: flex-end;
-}
-
-.task-table .task-error-row td {
+.task-line:last-child {
   border-bottom: 0;
-  padding-top: 4px;
-  padding-bottom: 8px;
 }
 
-.task-table .task-error {
+.task-line-time {
+  flex: 0 0 150px;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.task-line-prompt {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-line-state {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.task-line-progress {
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.task-line-progress.is-fail {
   color: var(--danger);
-  line-height: 1.6;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.task-table .task-items-row td {
-  padding-top: 0;
-  background: var(--surface-2);
-}
-
-.task-table .task-items-row .task-items {
-  padding: 6px 0;
-}
-
-/* Tables never break the page layout: too narrow and they scroll sideways. */
-.table-scroll {
-  overflow-x: auto;
-  -webkit-overflow-scrolling: touch;
 }
 
 .chip {
@@ -949,25 +948,6 @@ table.data .mono {
 .chip.off {
   background: var(--warn-soft);
   color: var(--warn);
-}
-
-/* -- tasks ------------------------------------------------------------ */
-
-.task-filter-bar {
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--line);
-}
-
-.row-actions {
-  display: flex;
-  gap: 6px;
-}
-
-.task-items {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding: 4px 0;
 }
 
 /* -- gallery ---------------------------------------------------------- */
@@ -1930,9 +1910,6 @@ html[data-theme="dark"] .startup-banner {
     min-height: 110px;
   }
 
-  .table-scroll table.data {
-    min-width: 720px;
-  }
 }
 
 /* Touch screens have no hover, so the star has to be visible all the time.
@@ -2116,6 +2093,16 @@ html[data-theme="dark"] .startup-banner {
 
   .preset-edit-row .preset-prompt {
     grid-column: 1 / 2;
+  }
+
+  .task-line {
+    gap: 8px;
+    padding: 9px 12px;
+  }
+
+  .task-line-time {
+    flex-basis: 128px;
+    font-size: 10px;
   }
 }
 

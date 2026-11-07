@@ -221,18 +221,22 @@ def test_gallery_pages_by_sixty_with_a_jump_box():
         assert selector in css
 
 
-def test_tasks_page_filters_and_retries_failed_jobs():
+def test_tasks_page_is_a_single_line_list():
     script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    css = (WEB_DIR / "app.css").read_text(encoding="utf-8")
 
-    filters = script.split("const TASK_FILTERS = [")[1].split("];")[0]
-    for label in ("全部", "运行中", "已完成", "失败", "已取消"):
-        assert f'"{label}"' in filters
-    assert '"data-action": "task-filter"' in script
-    assert 'params.set("state", state.taskState)' in script
-
-    assert '"data-action": "task-retry"' in script
-    assert "/tasks/${encodeURIComponent(taskId)}/retry" in script
-    assert "已重新入队" in script
+    assert "function taskList(tasks)" in script
+    assert 'class: "task-line"' in script
+    assert "function taskStatusCell(task)" in script
+    assert "task-line-progress" in script
+    assert "只读汇总，不会改动队列" in script
+    # The page is read-only: retry and cancel belong to the conversation.
+    assert "task-retry" not in script
+    assert "task-cancel" not in script
+    assert "/retry" not in script
+    assert "TASK_FILTERS" not in script
+    assert ".task-line" in css
+    assert ".task-table" not in css
 
 
 def test_api_keys_use_the_list_item_editor():

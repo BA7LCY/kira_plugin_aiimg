@@ -2155,7 +2155,7 @@ async def test_input_image_accepts_a_remembered_ref(plugin_module, tmp_path):
         await plugin.terminate()
 
 
-async def test_batch_items_show_progress_and_can_be_retried(plugin_module, tmp_path):
+async def test_batch_items_show_progress(plugin_module, tmp_path):
     plugin, _ = await _ready_plugin(plugin_module, tmp_path)
     try:
         record = plugin._store.create(
@@ -2177,8 +2177,6 @@ async def test_batch_items_show_progress_and_can_be_retried(plugin_module, tmp_p
         assert [item["state"] for item in payload["items"]] == ["done", "failed"]
         assert payload["items"][0]["image_ref"] == "img-abc123"
         assert "error_kind" in payload["items"][1]
-        retry = plugin._retry_record(record, prompts=["b"])
-        assert retry.extra["prompts"] == ["b"]
     finally:
         await plugin.terminate()
 

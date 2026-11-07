@@ -1,4 +1,4 @@
-"""Web API tests for gallery search, bulk actions, details and task retry."""
+"""Web API tests for gallery search, bulk actions and details."""
 
 import base64
 
@@ -17,17 +17,6 @@ async def _start(plugin_module, tmp_path):
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path / "data"), _config())
     await plugin.initialize()
     return plugin
-
-
-def _capture_submit(plugin) -> list:
-    calls: list = []
-
-    async def fake_submit(record, runner, is_batch=False):
-        calls.append((record, runner, is_batch))
-        return "captured"
-
-    plugin._queue.submit = fake_submit
-    return calls
 
 
 async def test_gallery_api_search_filter_and_bulk(plugin_module, tmp_path):
@@ -225,92 +214,5 @@ async def test_tasks_api_filters_and_pages(plugin_module, tmp_path):
         page = await plugin.api_tasks(limit=2, offset=1)
         assert page["total"] == 5
         assert len(page["tasks"]) == 2
-    finally:
-        await plugin.terminate()
-
-
-async def test_retry_requeues_failed_task_with_same_parameters(plugin_module, tmp_path):
-    plugin = await _start(plugin_module, tmp_path)
-    try:
-        record = plugin._store.create(
-            kind="edit_image",
-            sid="sid-1",
-            session_type="group",
-            user_id="user-1",
-            prompt="make it red",
-            provider="p2",
-            chain=["p2", "p3"],
-            size="1024x1024",
-            extra={
-                "adapter": "qq",
-                "session_type": "group",
-                "session_id": "sid-1",
-                "input_image": "/tmp/a.png",
-                "prompt_layers": [{"text": "old layer"}],
-                "final_prompt": "old final",
-            },
-        )
-        plugin._store.set_error(record.task_id, "boom")
-        calls = _capture_submit(plugin)
-
-        result = await plugin.api_retry_task({}, record.task_id)
-        assert result["ok"] is True
-        assert result["source"] == record.task_id
-        assert result["task_id"] != record.task_id
-        assert len(calls) == 1
-
-        retry, runner, is_batch = calls[0]
-        assert is_batch is False
-        assert retry.task_id == result["task_id"]
-        assert retry.kind == "edit_image"
-        assert retry.prompt == "make it red"
-        assert retry.provider == "p2"
-        assert retry.chain == ["p2", "p3"]
-        assert retry.size == "1024x1024"
-        assert retry.sid == "sid-1"
-        assert retry.session_type == "group"
-        assert retry.user_id == "user-1"
-        assert retry.extra["input_image"] == "/tmp/a.png"
-        assert retry.extra["adapter"] == "qq"
-        assert "prompt_layers" not in retry.extra
-        assert "final_prompt" not in retry.extra
-
-        original = plugin._store.get(record.task_id)
-        assert original.status == "failed"
-        assert original.error == "boom"
-
-        batch = plugin._store.create(
-            kind="generate_image_batch",
-            prompt="two shots",
-            extra={"prompts": ["one", "two"]},
-        )
-        plugin._store.set_error(batch.task_id, "boom")
-        await plugin.api_retry_task({}, batch.task_id)
-        retry, _, is_batch = calls[-1]
-        assert is_batch is True
-        assert retry.extra["prompts"] == ["one", "two"]
-    finally:
-        await plugin.terminate()
-
-
-async def test_retry_rejects_non_failed_tasks(plugin_module, tmp_path):
-    plugin = await _start(plugin_module, tmp_path)
-    try:
-        calls = _capture_submit(plugin)
-
-        running = plugin._store.create(kind="generate_image", prompt="x")
-        plugin._store.set_status(running.task_id, "running")
-        rejected = await plugin.api_retry_task({}, running.task_id)
-        assert rejected == {"ok": False, "error": "只有失败的任务可以重试"}
-
-        done = plugin._store.create(kind="generate_image", prompt="y")
-        plugin._store.set_result(done.task_id, "ok")
-        assert (await plugin.api_retry_task({}, done.task_id))["ok"] is False
-
-        assert (await plugin.api_retry_task({}, "missing")) == {
-            "ok": False,
-            "error": "任务不存在",
-        }
-        assert calls == []
     finally:
         await plugin.terminate()

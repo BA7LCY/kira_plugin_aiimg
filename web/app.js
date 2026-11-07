@@ -21,7 +21,7 @@ const VIEWS = {
   tasks: {
     label: "任务",
     title: "任务",
-    sub: "排队、运行和历史记录",
+    sub: "只读汇总，不会改动队列，任务明细在聊天里看",
     icon: "tasks",
   },
   gallery: {
@@ -82,7 +82,6 @@ const state = {
   gallerySelect: false,
   galleryPicked: [],
   galleryTimer: 0,
-  taskState: "",
   refFiles: [],
   metrics: [],
   saving: false,
@@ -604,7 +603,7 @@ async function loadRecentTasks() {
       return;
     }
     box.className = "";
-    box.append(taskTable(tasks, false));
+    box.append(taskList(tasks));
   } catch (error) {
     box.textContent = String(error.message || error);
   }
@@ -1076,194 +1075,86 @@ function renderChains(root) {
 
 // -- tasks ------------------------------------------------------------
 
-const TASK_FILTERS = [
-  ["", "全部"],
-  ["running", "运行中"],
-  ["succeeded", "已完成"],
-  ["failed", "失败"],
-  ["cancelled", "已取消"],
-];
-
 function statusChip(status) {
   const [label, tone] = STATUS[status] || [status || "未知", "wait"];
   return el("span", { class: `chip ${tone}` }, label);
 }
 
-function formatTime(ts) {
+function taskTime(ts) {
   if (!ts) return "-";
   const date = new Date(Number(ts) * 1000);
   if (Number.isNaN(date.getTime())) return "-";
   const pad = (value) => String(value).padStart(2, "0");
-  return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  return `${date.getFullYear()}/${date.getMonth() + 1}/${date.getDate()} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
 }
 
-function duration(task) {
+function taskDurationSeconds(task) {
   const start = Number(task.started_at || 0);
   const end = Number(task.finished_at || 0) || (task.status === "running" ? Date.now() / 1000 : 0);
-  if (!start || !end || end < start) return "-";
-  const seconds = Math.round(end - start);
+  if (!start || !end || end < start) return null;
+  return Math.round(end - start);
+}
+
+function formatDuration(seconds) {
+  if (seconds === null || seconds === undefined) return "-";
   return seconds >= 60 ? `${Math.floor(seconds / 60)}分${seconds % 60}秒` : `${seconds}秒`;
 }
 
-// Delivery is read-only here: the task table reports what happened on the way
-// out, it never offers to send again (the model has its own resend tool).
-const DELIVERY_LABELS = {
-  delivered: ["已送达", "ok"],
-  failed: ["发送失败", "fail"],
-};
-
-const ITEM_STATES = {
-  done: ["完成", "ok"],
-  failed: ["失败", "fail"],
-  running: ["生成中", "run"],
-  queued: ["排队", "wait"],
-};
-
-function deliveryChip(task) {
-  const entry = DELIVERY_LABELS[String(task.delivery_state || "")];
-  if (!entry) return null;
-  const chip = el("span", { class: `chip ${entry[1]}` }, entry[0]);
-  const attempts = Number(task.delivery_attempts || 0);
-  if (attempts > 0) chip.title = `投递尝试 ${attempts} 次`;
-  return chip;
+function averageTaskTime(tasks) {
+  const values = tasks
+    .filter((task) => task.status !== "running")
+    .map(taskDurationSeconds)
+    .filter((value) => value !== null);
+  if (!values.length) return "-";
+  return formatDuration(Math.round(values.reduce((sum, value) => sum + value, 0) / values.length));
 }
 
-function taskTable(tasks, withActions) {
-  const columns = withActions ? 8 : 7;
-  const widths = withActions
-    ? ["8%", "8%", "9%", "11%", "26%", "12%", "8%", "18%"]
-    : ["10%", "10%", "10%", "13%", "31%", "14%", "12%"];
-  const table = el("table", { class: "data task-table" });
-  table.append(
-    el(
-      "colgroup",
-      {},
-      ...widths.map((width) => el("col", { style: `width:${width}` }))
-    )
-  );
-  const head = el(
-    "tr",
-    {},
-    el("th", {}, "功能"),
-    el("th", {}, "状态"),
-    el("th", {}, "投递"),
-    el("th", {}, "服务商"),
-    el("th", {}, "提示词"),
-    el("th", {}, "创建"),
-    el("th", {}, "耗时"),
-    withActions ? el("th", { class: "actions-cell" }, "操作") : null
-  );
-  table.append(el("thead", {}, head));
-  const body = el("tbody", {});
-  for (const task of tasks) {
-    const canCancel = task.status === "queued" || task.status === "running";
-    const items = Array.isArray(task.items) ? task.items : [];
-    const failedItems = items.filter((item) => item.state === "failed");
-    const rowActions = [];
-    if (canCancel) {
-      rowActions.push(
-        el(
-          "button",
-          {
-            class: "btn small ghost",
-            type: "button",
-            "data-action": "task-cancel",
-            "data-task": task.task_id,
-            title: "停止后续生成；已经发出的请求可能仍会完成",
-            "aria-label": "取消任务",
-          },
-          "取消"
-        )
-      );
-    }
-    if (task.status === "failed") {
-      rowActions.push(
-        el(
-          "button",
-          {
-            class: "btn small ghost",
-            type: "button",
-            "data-action": "task-retry",
-            "data-task": task.task_id,
-          },
-          iconNode("refresh"),
-          "重试"
-        )
-      );
-    }
-    if (failedItems.length) {
-      rowActions.push(
-        el(
-          "button",
-          {
-            class: "btn small ghost",
-            type: "button",
-            "data-action": "task-retry",
-            "data-task": task.task_id,
-            "data-only-failed": "1",
-          },
-          iconNode("refresh"),
-          "重试失败项"
-        )
-      );
-    }
-    body.append(
+function taskStatusCell(task) {
+  const cell = el("div", { class: "task-line-state" });
+  const items = Array.isArray(task.items) ? task.items : [];
+  cell.append(statusChip(task.status));
+  if (items.length) {
+    const done = items.filter((item) => item.state === "done").length;
+    const failed = items.filter((item) => item.state === "failed").length;
+    cell.append(
       el(
-        "tr",
-        {},
-        el("td", {}, KIND_LABELS[task.kind] || task.kind || "-"),
-        el("td", {}, statusChip(task.status)),
-        el("td", {}, deliveryChip(task)),
-        el("td", { class: "mono" }, task.provider || "-"),
-        el(
-          "td",
-          { class: "prompt-cell", title: task.prompt || "" },
-          task.prompt || "-"
-        ),
-        el("td", { class: "mono" }, formatTime(task.created_at)),
-        el("td", { class: "mono" }, duration(task)),
-        withActions
-          ? el("td", { class: "actions-cell" }, el("div", { class: "row-actions" }, ...rowActions))
-          : null
+        "span",
+        { class: `task-line-progress${failed ? " is-fail" : ""}` },
+        failed ? `${done}/${items.length} · ${failed} 失败` : `${done}/${items.length}`
       )
     );
-    if (task.error) {
-      body.append(
-        el(
-          "tr",
-          { class: "task-error-row" },
-          el(
-            "td",
-            { colspan: columns, class: "task-error mono" },
-            task.error
-          )
-        )
-      );
-    }
-    if (items.length) {
-      const chips = items.map((item) => {
-        const [label, tone] = ITEM_STATES[item.state] || [item.state || "未知", "wait"];
-        const chip = el("span", { class: `chip ${tone}` }, `${item.index}. ${label}`);
-        chip.title = `${item.prompt || ""}${item.error_kind ? `（${item.error_kind}）` : ""}`;
-        return chip;
-      });
-      body.append(
-        el(
-          "tr",
-          { class: "task-items-row" },
-          el(
-            "td",
-            { colspan: columns },
-            el("div", { class: "task-items" }, ...chips)
-          )
-        )
-      );
-    }
   }
-  table.append(body);
-  // Narrow screens scroll the table sideways rather than squeezing every
-  // column into an unreadable strip.
-  return el("div", { class: "table-scroll" }, table);
+  const notes = [];
+  if (task.error) notes.push(task.error);
+  if (items.length) {
+    notes.push(
+      ...items.map((item, index) => {
+        const label = `${Number(item.index ?? index) + 1}. ${item.state || "未知"}`;
+        return item.error ? `${label}：${item.error}` : label;
+      })
+    );
+  }
+  if (task.provider) notes.push(`服务商：${task.provider}`);
+  if (task.delivery_state) notes.push(`投递：${task.delivery_state}`);
+  if (notes.length) cell.title = notes.join("\n");
+  return cell;
+}
+
+function taskLine(task) {
+  const prompt = task.prompt || "（无提示词）";
+  const row = el("div", { class: "task-line" });
+  row.append(
+    el("span", { class: "task-line-time mono" }, taskTime(task.created_at)),
+    el("span", { class: "task-line-prompt", title: prompt }, prompt),
+    taskStatusCell(task)
+  );
+  return row;
+}
+
+function taskList(tasks) {
+  const list = el("div", { class: "task-list" });
+  for (const task of tasks) list.append(taskLine(task));
+  return list;
 }
 
 function renderTasks(root) {
@@ -1271,15 +1162,16 @@ function renderTasks(root) {
   const stats = el("div", { class: "grid-stats" });
   stats.append(
     statCard("play", "运行中", String(queue.running || 0), `并行上限 ${queue.max_running ?? "-"}`),
-    statCard("clock", "等待中", String(queue.waiting || 0), `排队上限 ${queue.max_queued ?? "-"}`),
-    statCard("tasks", "最近记录", `<span id="tasks-count">${state.tasks.length}</span>`, "最多显示 100 条")
+    statCard("clock", "排队", String(queue.waiting || 0), `等待队列 ${queue.max_queued ?? "-"}`),
+    statCard("grid", "队列上限", String(queue.max_queued ?? "-"), "达到上限就不再接新任务"),
+    statCard("clock", "每张用时", `<span id="avg-task-time">-</span>`, "最近完成的任务")
   );
   const card = el("div", { class: "card" });
   card.append(
     el(
       "div",
       { class: "card-head" },
-      el("h2", {}, "任务列表"),
+      el("h2", {}, "最近任务"),
       el("span", { class: "sub" }, "每 5 秒自动刷新"),
       el("span", { class: "spacer" }),
       el(
@@ -1290,23 +1182,8 @@ function renderTasks(root) {
       )
     )
   );
-  const filters = el("div", { class: "tabs task-filters" });
-  for (const [value, label] of TASK_FILTERS) {
-    filters.append(
-      el(
-        "button",
-        {
-          type: "button",
-          "data-action": "task-filter",
-          "data-state": value,
-          "aria-selected": state.taskState === value ? "true" : "false",
-        },
-        label
-      )
-    );
-  }
   const holder = el("div", { id: "task-holder" }, el("div", { class: "empty" }, "读取中…"));
-  card.append(el("div", { class: "task-filter-bar" }, filters), holder);
+  card.append(holder);
   root.append(stats, card);
   loadTasks();
   startPolling();
@@ -1315,26 +1192,17 @@ function renderTasks(root) {
 async function loadTasks() {
   const holder = $("#task-holder");
   if (!holder) return;
-  // Polling rebuilds this table every few seconds. On a phone the sideways
-  // position is part of what the reader is looking at, so it is put back.
-  const keptScroll = holder.querySelector(".table-scroll")?.scrollLeft || 0;
-  const params = new URLSearchParams({ limit: "100" });
-  if (state.taskState) params.set("state", state.taskState);
   try {
-    const data = await api(`/tasks?${params.toString()}`);
+    const data = await api("/tasks?limit=100");
     state.tasks = data.tasks || [];
-    const count = $("#tasks-count");
-    if (count) count.textContent = String(state.tasks.length);
+    const average = $("#avg-task-time");
+    if (average) average.textContent = averageTaskTime(state.tasks);
     holder.replaceChildren();
     if (!state.tasks.length) {
-      holder.append(
-        el("div", { class: "empty" }, state.taskState ? "这个状态下还没有任务" : "还没有任务")
-      );
+      holder.append(el("div", { class: "empty" }, "还没有任务"));
       return;
     }
-    holder.append(taskTable(state.tasks, true));
-    const box = holder.querySelector(".table-scroll");
-    if (box) box.scrollLeft = keptScroll;
+    holder.append(taskList(state.tasks));
   } catch (error) {
     holder.replaceChildren(el("div", { class: "empty" }, String(error.message || error)));
   }
@@ -1373,7 +1241,7 @@ async function refreshStatus() {
           box.textContent = "还没有任务记录";
         } else {
           box.className = "";
-          box.append(taskTable(tasks.tasks, false));
+          box.append(taskList(tasks.tasks));
         }
         renderNav();
       }
@@ -3158,10 +3026,6 @@ function onViewClick(event) {
       render();
       return;
     }
-    if (action === "task-cancel") {
-      cancelTask(button.dataset.task);
-      return;
-    }
     if (action === "tasks-refresh") {
       loadTasks();
       refreshStatus();
@@ -3206,14 +3070,6 @@ function onViewClick(event) {
     if (action === "bulk-clear") {
       state.galleryPicked = [];
       render();
-      return;
-    }
-    if (action === "task-filter") {
-      filterTasks(button.dataset.state || "");
-      return;
-    }
-    if (action === "task-retry") {
-      retryTask(button.dataset.task, button.dataset.onlyFailed === "1");
       return;
     }
     if (action === "gallery-refresh") {
@@ -3386,46 +3242,6 @@ function closeModal() {
   // A dialog closed from the outside still has to give its caller an answer,
   // otherwise whoever awaited it waits forever.
   if (dismiss) dismiss();
-}
-
-async function cancelTask(taskId) {
-  try {
-    const data = await api("/tasks/cancel", {
-      method: "POST",
-      body: JSON.stringify({ task_id: taskId }),
-    });
-    toast(
-      data.ok
-        ? "已停止后续提交；已经发出的请求可能仍会完成"
-        : "停止没成功，可能刚开始跑"
-    );
-    loadTasks();
-    refreshStatus();
-  } catch (error) {
-    toast(String(error.message || error), "error");
-  }
-}
-
-async function retryTask(taskId, onlyFailed = false) {
-  if (!taskId) return;
-  try {
-    const data = await api(`/tasks/${encodeURIComponent(taskId)}/retry`, {
-      method: "POST",
-      body: JSON.stringify({ task_id: taskId, only_failed: onlyFailed }),
-    });
-    toast(data.ok ? "已重新入队" : data.error || "重试没成功", data.ok ? "info" : "error");
-    if (data.ok) {
-      await loadTasks();
-      refreshStatus();
-    }
-  } catch (error) {
-    toast(String(error.message || error), "error");
-  }
-}
-
-function filterTasks(nextState) {
-  state.taskState = nextState || "";
-  render();
 }
 
 async function favoriteImage(imageId, favorite) {
