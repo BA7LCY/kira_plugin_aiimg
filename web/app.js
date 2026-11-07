@@ -1129,7 +1129,18 @@ function deliveryChip(task) {
 }
 
 function taskTable(tasks, withActions) {
-  const table = el("table", { class: "data" });
+  const columns = withActions ? 8 : 7;
+  const widths = withActions
+    ? ["8%", "8%", "9%", "11%", "26%", "12%", "8%", "18%"]
+    : ["10%", "10%", "10%", "13%", "31%", "14%", "12%"];
+  const table = el("table", { class: "data task-table" });
+  table.append(
+    el(
+      "colgroup",
+      {},
+      ...widths.map((width) => el("col", { style: `width:${width}` }))
+    )
+  );
   const head = el(
     "tr",
     {},
@@ -1140,7 +1151,7 @@ function taskTable(tasks, withActions) {
     el("th", {}, "提示词"),
     el("th", {}, "创建"),
     el("th", {}, "耗时"),
-    withActions ? el("th", {}, "") : null
+    withActions ? el("th", { class: "actions-cell" }, "操作") : null
   );
   table.append(el("thead", {}, head));
   const body = el("tbody", {});
@@ -1206,22 +1217,24 @@ function taskTable(tasks, withActions) {
         el("td", { class: "mono" }, task.provider || "-"),
         el(
           "td",
-          { title: task.prompt || "" },
-          (task.prompt || "").slice(0, 48) + ((task.prompt || "").length > 48 ? "…" : "")
+          { class: "prompt-cell", title: task.prompt || "" },
+          task.prompt || "-"
         ),
         el("td", { class: "mono" }, formatTime(task.created_at)),
         el("td", { class: "mono" }, duration(task)),
-        withActions ? el("td", {}, el("div", { class: "row-actions" }, ...rowActions)) : null
+        withActions
+          ? el("td", { class: "actions-cell" }, el("div", { class: "row-actions" }, ...rowActions))
+          : null
       )
     );
     if (task.error) {
       body.append(
         el(
           "tr",
-          {},
+          { class: "task-error-row" },
           el(
             "td",
-            { colspan: withActions ? "8" : "7", class: "mono", style: "color:var(--danger)" },
+            { colspan: columns, class: "task-error mono" },
             task.error
           )
         )
@@ -1237,10 +1250,10 @@ function taskTable(tasks, withActions) {
       body.append(
         el(
           "tr",
-          {},
+          { class: "task-items-row" },
           el(
             "td",
-            { colspan: withActions ? "8" : "7" },
+            { colspan: columns },
             el("div", { class: "task-items" }, ...chips)
           )
         )

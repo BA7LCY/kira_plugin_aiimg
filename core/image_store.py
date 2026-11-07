@@ -19,7 +19,6 @@ from pathlib import Path
 from .image_format import (
     content_digest,
     guess_image_mime_and_ext,
-    normalize_orientation,
     preview_jpeg,
     thumbnail_webp,
 )
@@ -126,7 +125,7 @@ class ImageStore:
         that lands on the same image reuses the existing file, which keeps
         retention budgets from being spent on duplicates.
         """
-        data = normalize_orientation(data)
+        # 原样写入：不做 EXIF 旋转、转码或重压缩，发送的就是服务商给的字节。
         digest = content_digest(data)
         if dedupe:
             existing = self.find_by_digest(digest)

@@ -864,6 +864,51 @@ table.data .mono {
   color: var(--muted);
 }
 
+.task-table {
+  table-layout: fixed;
+}
+
+.task-table th,
+.task-table td {
+  overflow: hidden;
+}
+
+.task-table .prompt-cell {
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.task-table .actions-cell {
+  text-align: right;
+}
+
+.task-table .row-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.task-table .task-error-row td {
+  border-bottom: 0;
+  padding-top: 4px;
+  padding-bottom: 8px;
+}
+
+.task-table .task-error {
+  color: var(--danger);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.task-table .task-items-row td {
+  padding-top: 0;
+  background: var(--surface-2);
+}
+
+.task-table .task-items-row .task-items {
+  padding: 6px 0;
+}
+
 /* Tables never break the page layout: too narrow and they scroll sideways. */
 .table-scroll {
   overflow-x: auto;

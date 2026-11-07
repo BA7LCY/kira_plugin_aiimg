@@ -80,6 +80,13 @@ def test_image_params_validate_and_default_gif_frames():
         )
 
 
+def test_image_params_keep_quality_optional():
+    assert "quality" not in build_image_params()
+    assert build_image_params(quality="high") == {"quality": "high"}
+    with pytest.raises(ValueError):
+        build_image_params(quality="highest")
+
+
 def test_image_params_keep_zero_compression_and_markup():
     params = build_image_params(
         output_format="webp", output_compression=0, markup="把左边改成红色"
@@ -121,6 +128,24 @@ async def test_gif_is_accepted_and_png_is_rejected_for_gif():
             "1024x1024",
             "gif",
         )
+
+
+@pytest.mark.asyncio
+async def test_requested_jpeg_keeps_png_bytes():
+    """No PNG-to-JPEG conversion: the provider's bytes are what we keep."""
+    backend = _backend()
+    png = _png()
+
+    results = await backend._extract_images(
+        {"data": [{"b64_json": _b64(png)}]},
+        "gpt-image-2.6",
+        "1024x1024",
+        "jpeg",
+    )
+
+    assert results[0].data == png
+    assert results[0].mime == "image/png"
+    assert results[0].ext == "png"
 
 
 @pytest.mark.asyncio

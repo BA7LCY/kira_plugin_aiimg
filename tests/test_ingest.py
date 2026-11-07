@@ -1,4 +1,4 @@
-"""Ingest safety: EXIF orientation, duplicate detection and placeholder rules."""
+"""Ingest safety: verbatim bytes, duplicate detection and placeholder rules."""
 
 from __future__ import annotations
 
@@ -7,11 +7,7 @@ import io
 
 from PIL import Image as PILImage
 
-from core.image_format import (
-    content_digest,
-    is_placeholder_image,
-    normalize_orientation,
-)
+from core.image_format import content_digest, is_placeholder_image
 from core.image_store import ImageStore
 
 
@@ -36,23 +32,6 @@ def _png(width: int = 24, height: int = 24) -> bytes:
 def _size(data: bytes) -> tuple[int, int]:
     with PILImage.open(io.BytesIO(data)) as image:
         return image.size
-
-
-def test_orientation_is_baked_in_and_tag_dropped():
-    data = _jpeg(40, 20, orientation=6)
-
-    fixed = normalize_orientation(data)
-
-    assert fixed is not data
-    assert _size(fixed) == (20, 40)
-    with PILImage.open(io.BytesIO(fixed)) as image:
-        assert not image.getexif().get(0x0112)
-
-
-def test_upright_images_pass_through_untouched():
-    data = _jpeg(40, 20)
-
-    assert normalize_orientation(data) is data
 
 
 def test_digest_is_stable_and_content_addressed():
@@ -107,18 +86,18 @@ def test_store_keeps_separate_rows_without_dedupe(tmp_path):
     assert len(store.list_gallery()) == 2
 
 
-def test_the_same_rotated_source_collapses_after_normalising(tmp_path):
-    """Two copies of one phone photo share bytes only once orientation is baked in."""
+def test_store_keeps_provider_bytes_verbatim(tmp_path):
+    """The gallery writes exactly what the provider returned, EXIF included."""
     store = ImageStore(tmp_path, {"gallery": {}})
-    rotated = _jpeg(40, 20, orientation=6)
+    original = _jpeg(40, 20, orientation=6)
 
     async def run():
         first = await store.save_image(
-            rotated, provider_id="p", model="m", size="20x40", sid="u",
+            original, provider_id="p", model="m", size="20x40", sid="u",
             task_id="a", dedupe=True,
         )
         second = await store.save_image(
-            rotated, provider_id="p", model="m", size="20x40", sid="u",
+            original, provider_id="p", model="m", size="20x40", sid="u",
             task_id="b", dedupe=True,
         )
         return first, second
@@ -126,5 +105,8 @@ def test_the_same_rotated_source_collapses_after_normalising(tmp_path):
     first, second = asyncio.run(run())
 
     assert first == second
-    assert _size(first.read_bytes()) == (20, 40)
+    assert first.read_bytes() == original
+    assert _size(first.read_bytes()) == (40, 20)
+    with PILImage.open(io.BytesIO(first.read_bytes())) as image:
+        assert image.getexif().get(0x0112) == 6
     assert len(store.list_gallery()) == 1

@@ -1265,7 +1265,7 @@ class AIImagePlugin(BasePlugin):
                 "quality": {
                     "type": "string",
                     "enum": ["low", "medium", "high", "auto"],
-                    "description": "画质档位；不填用服务商默认",
+                    "description": "画质档位；用户说最高品质/高画质填 high，中品质填 medium，低画质/快速填 low；没说就不填，用服务商默认",
                 },
                 "complexity": {
                     "type": "string",
@@ -1458,7 +1458,7 @@ class AIImagePlugin(BasePlugin):
                 "quality": {
                     "type": "string",
                     "enum": ["low", "medium", "high", "auto"],
-                    "description": "画质档位；不填用服务商默认",
+                    "description": "画质档位；用户说最高品质/高画质填 high，中品质填 medium，低画质/快速填 low；没说就不填，用服务商默认",
                 },
                 "complexity": {
                     "type": "string",
@@ -1642,7 +1642,7 @@ class AIImagePlugin(BasePlugin):
                 "quality": {
                     "type": "string",
                     "enum": ["low", "medium", "high", "auto"],
-                    "description": "画质档位；不填用服务商默认",
+                    "description": "画质档位；用户说最高品质/高画质填 high，中品质填 medium，低画质/快速填 low；没说就不填，用服务商默认",
                 },
                 "complexity": {
                     "type": "string",

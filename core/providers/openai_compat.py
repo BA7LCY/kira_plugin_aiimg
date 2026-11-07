@@ -499,17 +499,13 @@ class OpenAICompatBackend(KeyPoolMixin, ImageBackend):
                 raise FormatMismatchError("服务商没有返回请求的位图格式")
         else:
             validate_image_bytes(raw, cap)
-            if expected in ("gif", "png", "jpeg", "webp"):
+            # GIF 是明确要动的图，静态图不能冒充；PNG/JPEG/WebP
+            # 之间不转码，服务商给哪个就存哪个、发哪个。
+            if expected == "gif":
                 mime, _ext = guess_image_mime_and_ext(raw)
-                wanted_mime = {
-                    "gif": "image/gif",
-                    "png": "image/png",
-                    "jpeg": "image/jpeg",
-                    "webp": "image/webp",
-                }[expected]
-                if mime != wanted_mime:
+                if mime != "image/gif":
                     raise FormatMismatchError(
-                        f"服务商没有返回 {expected.upper()}（实际是 {mime}）"
+                        f"服务商没有返回 GIF（实际是 {mime}）"
                     )
 
         if not is_svg and is_placeholder_image(raw):
