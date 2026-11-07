@@ -1024,10 +1024,6 @@ class AIImagePlugin(BasePlugin):
             chain = [item for item in chain if item.provider_id == provider]
             if not chain:
                 return f"服务商 {provider} 不可用或不在默认链路中"
-        chain = self._format_chain(chain, image_params)
-        if not chain:
-            wanted = str((image_params or {}).get("output_format") or "").upper()
-            return self._denied(kind, f"没有服务商支持 {wanted}")
         extra = self._task_extra(
             event,
             explicit=self._explicit(size, aspect_ratio, resolution),
@@ -1394,22 +1390,6 @@ class AIImagePlugin(BasePlugin):
             or str(image or "").strip()
             or selfie
         )
-
-    def _format_chain(self, chain: list[Any], image_params: dict | None) -> list[Any]:
-        """Keep only providers that declared the requested output format."""
-        fmt = str((image_params or {}).get("output_format") or "").strip().lower()
-        if fmt not in ("gif", "svg"):
-            return list(chain)
-        capability = f"supports_{fmt}"
-        kept: list[Any] = []
-        for item in chain:
-            try:
-                provider_settings = self._registry.get_settings(item.provider_id)
-            except KeyError:
-                continue
-            if bool(getattr(provider_settings, capability, False)):
-                kept.append(item)
-        return kept
 
     @staticmethod
     def _image_params(
@@ -1853,10 +1833,6 @@ class AIImagePlugin(BasePlugin):
             chain = [item for item in chain if item.provider_id == provider]
             if not chain:
                 return f"服务商 {provider} 不可用或不在默认链路中"
-        chain = self._format_chain(chain, image_params)
-        if not chain:
-            wanted = str((image_params or {}).get("output_format") or "").upper()
-            return self._denied("generate_image", f"没有服务商支持 {wanted}")
         extra = self._task_extra(
             event,
             explicit=self._explicit(size, aspect_ratio, resolution),

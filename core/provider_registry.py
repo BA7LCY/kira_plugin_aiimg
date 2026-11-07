@@ -126,8 +126,6 @@ class ProviderRegistry:
                 if template_key == "openai_full_url_images"
                 else bool(entry.get("supports_edit", True))
             ),
-            supports_gif=bool(entry.get("supports_gif", False)),
-            supports_svg=bool(entry.get("supports_svg", False)),
             extra_body=dict(entry.get("extra_body") or {}),
             proxy_url=str(entry.get("proxy_url") or "").strip(),
             output_format=str(entry.get("output_format") or "jpeg").strip().lower(),

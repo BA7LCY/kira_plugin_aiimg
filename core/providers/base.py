@@ -111,8 +111,6 @@ class ProviderSettings:
     model: str = ""
     default_size: str = "1024x1024"
     supports_edit: bool = True
-    supports_gif: bool = False
-    supports_svg: bool = False
     extra_body: dict[str, Any] = field(default_factory=dict)
     proxy_url: str = ""
     output_format: str = "jpeg"

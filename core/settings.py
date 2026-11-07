@@ -57,8 +57,6 @@ TEMPLATE_CATALOG: tuple[dict[str, Any], ...] = (
             "model",
             "default_size",
             "supports_edit",
-            "supports_gif",
-            "supports_svg",
             "generate_request_mode",
             "edit_request_mode",
             "async_mode",
@@ -263,16 +261,6 @@ FIELD_META: dict[str, dict[str, Any]] = {
         "label": "支持改图",
         "type": "switch",
         "hint": "服务商不能改图就关掉，改图请求会自动交给链路上的下一家。",
-    },
-    "supports_gif": {
-        "label": "支持 GIF",
-        "type": "switch",
-        "hint": "只有确认这家服务商能按 output_format=gif 返回动画时才打开；关掉时 GIF 请求会跳到下一家。",
-    },
-    "supports_svg": {
-        "label": "支持 SVG",
-        "type": "switch",
-        "hint": "只有确认这家服务商真的返回 SVG 时才打开；返回 PNG 会按不支持处理，不消耗熔断次数。",
     },
     "extra_body": {
         "label": "额外参数",
@@ -836,12 +824,6 @@ def normalize_provider(raw: Any, index: int) -> dict[str, Any]:
     if type(supports_edit) is not bool:
         raise ValueError(f"服务商「{provider_id}」的「支持改图」只能是开或关")
     result["supports_edit"] = supports_edit
-
-    for flag in ("supports_gif", "supports_svg"):
-        value = raw.get(flag, False)
-        if type(value) is not bool:
-            raise ValueError(f"服务商「{provider_id}」的「{field_label(flag)}」只能是开或关")
-        result[flag] = value
 
     mode = str(result.get("mode") or "").strip().lower()
     if entry["kind"] == "video" and mode not in _VIDEO_MODES:
