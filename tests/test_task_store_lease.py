@@ -1,36 +1,11 @@
 """Owner-lease and state-machine tests for TaskStore (SQLite)."""
 
 import asyncio
-import sqlite3
 import time
 
 import pytest
 
 from core.task_store import TaskStore, new_owner_id
-
-# Schema as shipped before the lease columns existed (task_store < 0.3.4).
-OLD_SCHEMA = """
-CREATE TABLE tasks (
-    task_id TEXT PRIMARY KEY,
-    kind TEXT NOT NULL,
-    sid TEXT NOT NULL DEFAULT '',
-    session_type TEXT NOT NULL DEFAULT '',
-    user_id TEXT NOT NULL DEFAULT '',
-    prompt TEXT NOT NULL DEFAULT '',
-    provider TEXT NOT NULL DEFAULT '',
-    status TEXT NOT NULL,
-    result TEXT NOT NULL DEFAULT '',
-    error TEXT NOT NULL DEFAULT '',
-    created_at INTEGER NOT NULL,
-    started_at INTEGER NOT NULL DEFAULT 0,
-    finished_at INTEGER NOT NULL DEFAULT 0,
-    chain TEXT NOT NULL DEFAULT '[]',
-    prompt_layers TEXT NOT NULL DEFAULT '[]',
-    final_prompt TEXT NOT NULL DEFAULT '',
-    size TEXT NOT NULL DEFAULT '',
-    extra TEXT NOT NULL DEFAULT '{}'
-)
-"""
 
 OWNER_A = "aiimg-1001-aaaaaaaa"
 OWNER_B = "aiimg-1001-bbbbbbbb"
@@ -62,44 +37,6 @@ def test_new_owner_id_shape():
     assert len(suffix) == 8
     int(suffix, 16)
     assert first != second
-
-
-async def test_migration_from_old_schema(tmp_path):
-    """An old database file keeps working and gains the lease columns."""
-    db_path = tmp_path / "tasks.sqlite3"
-    old_db = sqlite3.connect(str(db_path))
-    old_db.executescript(OLD_SCHEMA)
-    old_db.execute(
-        "INSERT INTO tasks (task_id, kind, status, created_at, prompt) "
-        "VALUES (?, ?, ?, ?, ?)",
-        ("old-1", "generate_image", "queued", int(time.time()), "旧任务"),
-    )
-    old_db.commit()
-    old_db.close()
-
-    store = TaskStore(tmp_path)
-    try:
-        record = store.get("old-1")
-        assert record is not None
-        assert record.prompt == "旧任务"
-        assert record.status == "queued"
-        assert record.owner == ""
-        assert record.lease_until == 0.0
-        assert record.attempts == 0
-
-        columns = {
-            str(row["name"])
-            for row in store._db.execute("PRAGMA table_info(tasks)").fetchall()
-        }
-        assert {"owner", "lease_until", "attempts"} <= columns
-
-        assert await store.claim("old-1", OWNER_A, 60.0) is True
-        claimed = store.get("old-1")
-        assert claimed.status == "running"
-        assert claimed.owner == OWNER_A
-        assert claimed.attempts == 1
-    finally:
-        store.close()
 
 
 async def test_claim_is_exclusive(store):

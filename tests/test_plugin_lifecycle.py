@@ -628,6 +628,29 @@ async def test_api_config_masks_provider_keys(plugin_module, tmp_path):
     assert "1234567890" not in shown
 
 
+async def test_api_provider_keys_returns_full_keys(plugin_module, tmp_path):
+    config = _compat_config()
+    config["providers"] = [
+        {
+            "id": "p1",
+            "api_keys": ["sk-real-key-1234567890abcdef"],
+            "model": "gpt-image-2",
+        }
+    ]
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
+    plugin._registry = _Registry()
+
+    result = await plugin.api_provider_keys({"id": "p1"})
+
+    assert result == {
+        "ok": True,
+        "id": "p1",
+        "keys": ["sk-real-key-1234567890abcdef"],
+    }
+    missing = await plugin.api_provider_keys({"id": "nope"})
+    assert missing["ok"] is False
+
+
 async def test_api_config_lite_skips_the_live_numbers(plugin_module, tmp_path):
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), _compat_config())
     plugin._registry = _Registry()

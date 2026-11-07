@@ -63,6 +63,9 @@ def build_image_params(
     if not 20 <= frame_ms <= 2000:
         raise ValueError("GIF 每帧时长要在 20 到 2000 毫秒之间")
 
+    clean_markup = str(markup or "").strip()
+    if fmt == "svg" and clean_markup:
+        raise ValueError("SVG 只能按文字生成，不能带红笔标注")
     if fmt == "svg" and wanted_n != 1:
         logger.info("[aiimg] SVG 只支持一张，n 从 %d 改为 1", wanted_n)
         wanted_n = 1
@@ -87,7 +90,6 @@ def build_image_params(
     if fmt == "gif":
         params["frame_count"] = frames
         params["frame_duration_ms"] = frame_ms
-    clean_markup = str(markup or "").strip()
     if clean_markup:
         params["markup"] = clean_markup[:8000]
     return params

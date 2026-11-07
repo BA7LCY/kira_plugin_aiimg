@@ -21,17 +21,6 @@ from .sizes import SUPPORTED_SIZES, normalize_ratio_default_sizes, normalize_siz
 
 DEFAULT_PROVIDER_TIMEOUT_SECONDS = 600
 
-# Template keys, with the short aliases accepted in older configs.
-TEMPLATE_ALIASES: dict[str, str] = {
-    "openai": "openai_images",
-    "openai_compat": "openai_images",
-    "openai_images": "openai_images",
-    "openai_chat": "openai_chat",
-    "openai_full_url": "openai_full_url_images",
-    "openai_full_url_images": "openai_full_url_images",
-    "agnes_video": "agnes_video",
-}
-
 _IMAGE_TEMPLATES = {"openai_images", "openai_chat", "openai_full_url_images"}
 _VIDEO_TEMPLATES = {"agnes_video"}
 
@@ -42,13 +31,6 @@ REQUIRED_FIELDS: dict[str, tuple[str, ...]] = {
     "openai_full_url_images": ("full_generate_url",),
     "agnes_video": ("base_url", "api_keys"),
 }
-
-
-def normalize_template_key(raw: Any) -> str:
-    key = str(raw or "").strip()
-    if not key:
-        return ""
-    return TEMPLATE_ALIASES.get(key, key)
 
 
 class ProviderRegistry:
@@ -101,13 +83,7 @@ class ProviderRegistry:
                 self._errors.append(f"provider {provider_id}: 未知模板 {settings.template_key!r}")
 
     def _settings_for(self, entry: dict) -> ProviderSettings:
-        template_key = normalize_template_key(
-            entry.get("__template_key")
-            or entry.get("template_key")
-            or entry.get("type")
-            or entry.get("provider_type")
-            or entry.get("id")
-        )
+        template_key = str(entry.get("template_key") or "").strip()
         settings = ProviderSettings(
             id=str(entry.get("id") or "").strip(),
             template_key=template_key,
@@ -130,9 +106,7 @@ class ProviderRegistry:
             proxy_url=str(entry.get("proxy_url") or "").strip(),
             output_format=str(entry.get("output_format") or "jpeg").strip().lower(),
             timeout=int(
-                entry.get("timeout_seconds")
-                or entry.get("timeout")
-                or DEFAULT_PROVIDER_TIMEOUT_SECONDS
+                entry.get("timeout_seconds") or DEFAULT_PROVIDER_TIMEOUT_SECONDS
             ),
             max_retries=int(entry.get("max_retries") or 2),
             max_concurrent=max(0, min(32, int(entry.get("max_concurrent") or 0))),

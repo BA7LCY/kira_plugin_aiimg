@@ -390,19 +390,11 @@ class AIImagePlugin(BasePlugin):
         }
 
     def _features(self, key: str, default: str = "") -> str:
-        value = self._cfg("section_features", key)
-        if value is None:
-            # Older configs predate newer fields; fall back to the declared
-            # default so a fresh template still applies without a save.
-            value = settings_mod.field_default("section_features", key, default)
-        return str(value or default).strip()
+        return str(self._cfg("section_features", key, default=default) or default).strip()
 
     def _prompts(self, key: str, default: str = "") -> str:
         """Read one text field from the prompt settings card."""
-        value = self._cfg("section_prompts", key)
-        if value is None:
-            value = settings_mod.field_default("section_prompts", key, default)
-        return str(value or "").strip()
+        return str(self._cfg("section_prompts", key, default=default) or default).strip()
 
     def _fetch_policy(self) -> URLFetchPolicy:
         """Build the fetch policy from provider + advanced section config."""
@@ -526,9 +518,7 @@ class AIImagePlugin(BasePlugin):
             "edit": "edit_presets",
             "video": "video_presets",
         }.get(kind, "draw_presets")
-        raw = self._cfg("section_prompts", key)
-        if raw is None:
-            raw = settings_mod.field_default("section_prompts", key, "")
+        raw = self._cfg("section_prompts", key, default="")
         presets: dict[str, str] = {}
         for line in self._lines(raw):
             text = str(line or "").strip()
@@ -821,7 +811,6 @@ class AIImagePlugin(BasePlugin):
         allowed = self._can_use(
             self._user_id(event), self._adapter_name(event), self._group_id(event)
         )
-        removed: list[str] = []
         for tool_name in TOOL_NAMES:
             if tool_name in READ_ONLY_TOOLS:
                 continue
@@ -829,15 +818,8 @@ class AIImagePlugin(BasePlugin):
                 continue
             try:
                 req.tool_set.remove(tool_name)
-                removed.append(tool_name)
             except Exception:
                 continue
-        if removed:
-            logger.info(
-                "[aiimg] 本轮不提供工具：%s（白名单=%s）",
-                "、".join(removed),
-                "通过" if allowed else "未通过",
-            )
 
     # ------------------------------------------------------------------
     # chains
@@ -1325,6 +1307,10 @@ class AIImagePlugin(BasePlugin):
             )
         except ValueError as exc:
             return self._denied("generate_image", str(exc))
+        if image_params.get("output_format") == "svg" and (
+            str(image or "").strip() or selfie
+        ):
+            return self._denied("generate_image", "SVG 只能按文字生成，不能带参考图")
         if self._wants_batch(prompts, brief, count, image, selfie):
             return await self._queue_batch_task(
                 event,
@@ -3808,11 +3794,6 @@ class AIImagePlugin(BasePlugin):
             )
         except Exception as exc:
             logger.debug("[aiimg] 注入预设说明失败：%s", exc)
-        else:
-            logger.info(
-                "[aiimg] 注入系统提示：预设 %d 条",
-                len(draw) + len(edit) + len(video),
-            )
 
     @on.llm_request(priority=Priority.LOW)
     async def _hide_builtin_media_tags(self, event, req, tag_set, *_):
@@ -3956,6 +3937,26 @@ class AIImagePlugin(BasePlugin):
         except Exception:
             logger.exception("[aiimg] 状态汇总失败")
         return payload
+
+    @register.api(method="POST", path="/aiimg/provider_keys", auth=True, summary="读取服务商完整密钥")
+    async def api_provider_keys(self, payload: dict):
+        """按需把一把服务商的密钥交给设置页，供眼睛按钮显示完整值。"""
+        data = payload if isinstance(payload, dict) else {}
+        provider_id = str(data.get("id") or "").strip()
+        if not provider_id:
+            return {"ok": False, "error": "缺少服务商 ID"}
+        for provider in (self.plugin_cfg or {}).get("providers") or []:
+            if not isinstance(provider, dict):
+                continue
+            if str(provider.get("id") or "").strip() != provider_id:
+                continue
+            keys = [
+                str(key).strip()
+                for key in (provider.get("api_keys") or [])
+                if str(key).strip()
+            ]
+            return {"ok": True, "id": provider_id, "keys": keys}
+        return {"ok": False, "error": "没有这个服务商"}
 
     @staticmethod
     def _merge_config(current: dict, incoming: dict) -> dict:

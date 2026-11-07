@@ -1315,6 +1315,71 @@ table.data .mono {
   border-bottom: 1px solid var(--line);
 }
 
+.entry-secret {
+  gap: 8px;
+}
+
+.entry-secret .entry-drop {
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.entry-secret:hover .entry-drop,
+.entry-secret:focus-within .entry-drop,
+.entry-secret .entry-drop:focus-visible {
+  opacity: 1;
+}
+
+.secret-field {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.secret-input {
+  flex: 1;
+  min-width: 0;
+  height: 38px;
+  padding: 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  outline: none;
+  background: var(--surface);
+  color: var(--ink-2);
+  font-family: var(--mono);
+  font-size: 13px;
+}
+
+.secret-input:focus {
+  border-color: var(--accent-line);
+}
+
+.secret-toggle {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.secret-toggle:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
+.secret-toggle svg {
+  width: 17px;
+  height: 17px;
+}
+
 .entry-no {
   flex: none;
   width: 22px;

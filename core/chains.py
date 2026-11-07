@@ -24,24 +24,6 @@ FEATURES = (
 
 DEFAULT_CHAIN_KEY = "default"
 
-# Accepted aliases -> canonical feature key.
-FEATURE_ALIASES: dict[str, str] = {
-    "draw": "generate_image",
-    "generate": "generate_image",
-    "edit": "edit_image",
-    "selfie": "generate_selfie",
-    "batch": "generate_image_batch",
-    "video": "generate_video",
-}
-
-
-def normalize_feature(feature: str) -> str:
-    key = str(feature or "").strip()
-    if key in FEATURE_ALIASES:
-        return FEATURE_ALIASES[key]
-    return key
-
-
 @dataclass(frozen=True)
 class ChainItem:
     provider_id: str
@@ -92,7 +74,7 @@ def chain_for(
     dropped so a stale config degrades instead of breaking.
     """
     raw = chains or {}
-    feature = normalize_feature(feature)
+    feature = str(feature or "").strip()
     configured = raw.get(feature, raw.get(DEFAULT_CHAIN_KEY))
     chain: list[ChainItem] = []
     for item in _as_items(configured):

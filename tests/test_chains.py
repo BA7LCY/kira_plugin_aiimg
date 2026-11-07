@@ -7,7 +7,6 @@ from core.chains import (
     DEFAULT_CHAIN_KEY,
     chain_for,
     explicit_chain,
-    normalize_feature,
     parse_chain_item,
 )
 
@@ -29,12 +28,6 @@ def test_parse_invalid():
         parse_chain_item("")
     with pytest.raises(ValueError):
         parse_chain_item({"output": "1:1"})
-
-
-def test_normalize_feature_alias():
-    assert normalize_feature("draw") == "generate_image"
-    assert normalize_feature("generate_image") == "generate_image"
-    assert normalize_feature("video") == "generate_video"
 
 
 def test_chain_for_feature_key():

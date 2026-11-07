@@ -71,15 +71,6 @@ class ImageStore:
             )
             """
         )
-        for column, decl in (
-            ("prompt", "TEXT NOT NULL DEFAULT ''"),
-            ("bytes", "INTEGER NOT NULL DEFAULT 0"),
-            ("digest", "TEXT NOT NULL DEFAULT ''"),
-        ):
-            try:
-                self._db.execute(f"ALTER TABLE images ADD COLUMN {column} {decl}")
-            except sqlite3.OperationalError:
-                pass
         for statement in (
             "CREATE INDEX IF NOT EXISTS idx_images_created_at ON images(created_at)",
             "CREATE INDEX IF NOT EXISTS idx_images_favorite ON images(favorite)",

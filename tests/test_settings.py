@@ -43,10 +43,10 @@ def test_revision_is_stable_and_content_sensitive():
     assert S.revision(first) != S.revision({"a": 2, "b": [1, 2]})
 
 
-def test_normalize_keeps_sections_and_merges_chain_aliases():
+def test_normalize_keeps_sections_and_parses_chain_items():
     config = S.with_defaults({})
     config["providers"] = [_provider(), _provider(provider_id="backup")]
-    config["chains"] = {"draw": ["main"], "generate_image": ["backup:4K"]}
+    config["chains"] = {"generate_image": ["main", "backup:4K"]}
 
     normalized = S.normalize(config)
 

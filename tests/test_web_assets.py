@@ -242,15 +242,32 @@ def test_tasks_page_is_a_single_line_list():
 def test_api_keys_use_the_list_item_editor():
     script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
     css = (WEB_DIR / "app.css").read_text(encoding="utf-8")
+    icons = (WEB_DIR / "icons.js").read_text(encoding="utf-8")
 
     assert "function providerKeysField(provider)" in script
     assert "return providerKeysField(provider);" in script
     assert 'title: `${fieldLabel("api_keys")}列表`' in script
+    # Opening the key editor asks for the full keys; the page itself only has masks.
+    assert "async function providerFullKeys(providerId)" in script
+    assert 'api("/provider_keys"' in script
+    assert "items = await providerFullKeys(provider.id);" in script
     # The editor adds one item per Enter press and can take a pasted block.
     assert "function openListEditor(options)" in script
     assert "function openListImport(options)" in script
     assert "输入一项后按回车添加" in script
+    assert "输入密钥后按回车添加" in script
     assert "空行会自动跳过" in script
+    # Provider keys are editable secret fields with a show/hide toggle.
+    assert 'secret: field === "api_keys"' in script
+    assert "const secret = Boolean(options.secret);" in script
+    assert 'type: secret ? "password" : "text"' in script
+    assert "const secretEntry = (text, index) => {" in script
+    assert 'class: "secret-input"' in script
+    assert 'class: "secret-toggle"' in script
+    assert 'title: "显示密钥"' in script
+    assert 'toggle.replaceChildren(iconNode(hidden ? "eye-off" : "eye"));' in script
+    assert "eye: [" in icons
+    assert '"eye-off": [' in icons
     assert 'if (action === "list-edit")' in script
     assert "if (!draft.includes(text)) draft.push(text);" in script
     # Enter keeps the caret in the box, drops the row into view and trims duplicates.
@@ -270,6 +287,10 @@ def test_api_keys_use_the_list_item_editor():
         ".entry-no",
         ".entry-text",
         ".entry-drop",
+        ".entry-secret",
+        ".secret-field",
+        ".secret-input",
+        ".secret-toggle",
         ".entry-hollow",
         ".paste-shell",
         ".paste-head",

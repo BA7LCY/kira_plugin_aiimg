@@ -58,6 +58,13 @@ def _b64(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
 
 
+def _svg() -> bytes:
+    return (
+        b'<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+        b'<rect width="10" height="10"/></svg>'
+    )
+
+
 def test_image_params_validate_and_default_gif_frames():
     params = build_image_params(output_format="GIF", n=2)
     assert params["output_format"] == "gif"
@@ -78,6 +85,8 @@ def test_image_params_validate_and_default_gif_frames():
         build_image_params(
             output_format="gif", formats=("png", "jpeg", "webp")
         )
+    with pytest.raises(ValueError, match="红笔标注"):
+        build_image_params(output_format="svg", markup="把左边改成红色")
 
 
 def test_image_params_keep_quality_optional():
@@ -146,6 +155,32 @@ async def test_requested_jpeg_keeps_png_bytes():
     assert results[0].data == png
     assert results[0].mime == "image/png"
     assert results[0].ext == "png"
+
+
+@pytest.mark.asyncio
+async def test_svg_request_sends_only_the_documented_switches():
+    backend = _backend()
+    seen: dict = {}
+
+    async def fake_post_json(url, key, payload, *, retries=0):
+        seen["url"] = url
+        seen["payload"] = payload
+        return {"data": [{"b64_json": _b64(_svg())}]}
+
+    backend._post_json = fake_post_json
+    params = build_image_params(
+        output_format="svg",
+        n=4,
+        output_compression=80,
+        frame_count=4,
+    )
+    results = await backend.generate("把这张照片画成矢量图", extra=params)
+
+    assert seen["payload"]["output_format"] == "svg"
+    assert "n" not in seen["payload"]
+    assert "output_compression" not in seen["payload"]
+    assert "svg" not in seen["payload"]
+    assert results[0].mime == "image/svg+xml"
 
 
 @pytest.mark.asyncio

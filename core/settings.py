@@ -13,8 +13,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .chains import FEATURE_ALIASES, FEATURES
-from .provider_registry import REQUIRED_FIELDS, normalize_template_key
+from .chains import FEATURES
+from .provider_registry import REQUIRED_FIELDS
 
 SCHEMA_PATH = Path(__file__).resolve().parent.parent / "schema.json"
 
@@ -765,9 +765,7 @@ def normalize_provider(raw: Any, index: int) -> dict[str, Any]:
         raise ValueError(f"第 {index + 1} 个服务商还没有填 ID")
     if len(provider_id) > 64 or any(ch.isspace() for ch in provider_id):
         raise ValueError(f"服务商 ID「{provider_id}」不能用空格，也不要超过 64 个字符")
-    template_key = normalize_template_key(
-        raw.get("__template_key") or raw.get("template_key")
-    )
+    template_key = str(raw.get("template_key") or "").strip()
     if not template_key:
         raise ValueError(f"服务商「{provider_id}」还没有选接口类型")
     entry = _template_entry(template_key)
@@ -869,9 +867,9 @@ def normalize_provider(raw: Any, index: int) -> dict[str, Any]:
         elif not str(value or "").strip():
             raise ValueError(f"服务商「{provider_id}」还缺{field_label(field)}")
 
-    # Keep unknown keys so future fields survive an older UI save.
+    # Keep unknown keys so future fields survive a save.
     for key, value in raw.items():
-        if key not in result and key != "__template_key":
+        if key not in result:
             result[key] = value
     return result
 
@@ -887,7 +885,7 @@ def normalize_chains(raw: Any) -> dict[str, list[Any]]:
         raise ValueError("功能链路格式不对，应该按功能分组")
     chains: dict[str, list[Any]] = {}
     for feature, items in raw.items():
-        key = FEATURE_ALIASES.get(str(feature or "").strip(), str(feature or "").strip())
+        key = str(feature or "").strip()
         if key not in FEATURES and key != "default":
             continue
         if items is None:
@@ -897,7 +895,7 @@ def normalize_chains(raw: Any) -> dict[str, list[Any]]:
         chain: list[Any] = []
         for item in items:
             if isinstance(item, dict):
-                provider_id = str(item.get("provider") or item.get("id") or "").strip()
+                provider_id = str(item.get("provider") or "").strip()
                 output = str(item.get("output") or "").strip()
                 if not provider_id:
                     raise ValueError(f"「{FEATURE_LABELS.get(key, {}).get('label', key)}」有链条目没有选服务商")

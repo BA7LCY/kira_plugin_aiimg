@@ -60,7 +60,7 @@ def _validate_transition(current: str, target: str) -> None:
         return
     allowed = _TRANSITIONS.get(current)
     if allowed is None:
-        # Old or unknown stored value: do not trap rows forever.
+        # Unknown stored value: do not trap rows forever.
         return
     if target in allowed:
         return
@@ -199,15 +199,6 @@ def _serialized(method):
 
 
 class TaskStore:
-    #: Columns added after the first release; old files get them via ALTER TABLE.
-    _LEASE_COLUMNS: tuple[tuple[str, str], ...] = (
-        ("owner", "TEXT NOT NULL DEFAULT ''"),
-        ("lease_until", "REAL NOT NULL DEFAULT 0"),
-        ("attempts", "INTEGER NOT NULL DEFAULT 0"),
-        ("delivery_state", "TEXT NOT NULL DEFAULT ''"),
-        ("delivery_attempts", "INTEGER NOT NULL DEFAULT 0"),
-    )
-
     def __init__(self, data_dir: Path):
         self._path = Path(data_dir) / "tasks.sqlite3"
         # 线程锁要在连接之前建好：下面初始化 schema 时就会用到。
@@ -226,7 +217,6 @@ class TaskStore:
         self._lock: asyncio.Lock | None = None
         self._configure()
         self._create_schema()
-        self._migrate()
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_tasks_status ON tasks(status)"
         )
@@ -293,21 +283,6 @@ class TaskStore:
             )
             """
         )
-
-    def _migrate(self) -> None:
-        """Add lease columns to a database created by an older version."""
-        existing = {
-            str(row["name"])
-            for row in self._db.execute("PRAGMA table_info(tasks)").fetchall()
-        }
-        added: list[str] = []
-        for name, decl in self._LEASE_COLUMNS:
-            if name not in existing:
-                self._db.execute(f"ALTER TABLE tasks ADD COLUMN {name} {decl}")
-                added.append(name)
-        self._db.commit()
-        if added:
-            logger.info("任务库补齐租约字段：%s", "、".join(added))
 
     def _alock(self) -> asyncio.Lock:
         """Lazily create the asyncio lock (bound to the running loop)."""

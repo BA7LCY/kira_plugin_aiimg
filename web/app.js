@@ -2313,9 +2313,18 @@ function listField(sectionKey, field, item, value) {
   });
 }
 
+function maskKey(value) {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  if (text.includes("…")) return text;
+  if (text.length >= 20) return `${text.slice(0, 4)}…${text.slice(-4)}`;
+  if (text.length >= 9) return `${text.slice(0, 2)}…${text.slice(-2)}`;
+  return "…";
+}
+
 function providerKeysField(provider) {
   const items = (Array.isArray(provider.api_keys) ? provider.api_keys : [])
-    .map((key) => String(key || "").trim())
+    .map((key) => maskKey(key))
     .filter(Boolean);
   return listSummaryField({
     label: fieldLabel("api_keys"),
@@ -2326,7 +2335,18 @@ function providerKeysField(provider) {
   });
 }
 
-function openListEditorFor(target, title) {
+async function providerFullKeys(providerId) {
+  const data = await api("/provider_keys", {
+    method: "POST",
+    body: JSON.stringify({ id: providerId }),
+  });
+  if (!data || data.ok === false) {
+    throw new Error((data && data.error) || "读取密钥失败");
+  }
+  return normalizeListItems(data.keys || []);
+}
+
+async function openListEditorFor(target, title) {
   const parts = String(target || "").split(":");
   if (parts[0] === "section") {
     const [, sectionKey, field] = parts;
@@ -2347,11 +2367,21 @@ function openListEditorFor(target, title) {
     const provider = selectedProvider();
     const field = parts[1];
     if (!provider || !field) return;
+    let items = (
+      Array.isArray(provider[field]) ? provider[field] : listValueItems(provider[field])
+    ).map((item) => String(item || "").trim());
+    if (field === "api_keys" && provider.id) {
+      try {
+        items = await providerFullKeys(provider.id);
+      } catch (error) {
+        toast(String(error.message || error), "error");
+        return;
+      }
+    }
     openListEditor({
       title,
-      items: (Array.isArray(provider[field]) ? provider[field] : listValueItems(provider[field])).map((item) =>
-        String(item || "").trim()
-      ),
+      secret: field === "api_keys",
+      items,
       onConfirm: (draft) => {
         provider[field] = draft;
         render();
@@ -2367,6 +2397,7 @@ function openListEditor(options) {
   const draft = normalizeListItems(options.items);
   // Keep the list as it was before the editor opened, even when a paste reopens it.
   const original = normalizeListItems(options.original ?? options.items);
+  const secret = Boolean(options.secret);
   const card = el("div", { class: "modal-shell narrow" });
   const countChip = el("span", { class: "chip count" }, `${draft.length} 项`);
   card.append(
@@ -2385,10 +2416,11 @@ function openListEditor(options) {
   );
   const body = el("div", { class: "modal-body" });
   const addInput = el("input", {
-    type: "text",
+    type: secret ? "password" : "text",
     class: "compose-input",
-    placeholder: "输入一项后按回车添加",
+    placeholder: secret ? "输入密钥后按回车添加" : "输入一项后按回车添加",
     spellcheck: "false",
+    autocomplete: "off",
   });
   const addButton = el(
     "button",
@@ -2400,6 +2432,39 @@ function openListEditor(options) {
 
   const grid = el("div", { class: "entry-grid" });
   body.append(grid);
+
+  const secretEntry = (text, index) => {
+    const field = el("div", { class: "secret-field" });
+    const input = el("input", {
+      type: "password",
+      class: "secret-input",
+      spellcheck: "false",
+      autocomplete: "off",
+    });
+    input.value = text;
+    input.addEventListener("input", () => {
+      draft[index] = input.value;
+    });
+    const toggle = el(
+      "button",
+      {
+        class: "secret-toggle",
+        type: "button",
+        title: "显示密钥",
+        "aria-label": "显示密钥",
+      },
+      iconNode("eye")
+    );
+    toggle.addEventListener("click", () => {
+      const hidden = input.type === "password";
+      input.type = hidden ? "text" : "password";
+      toggle.title = hidden ? "隐藏密钥" : "显示密钥";
+      toggle.setAttribute("aria-label", toggle.title);
+      toggle.replaceChildren(iconNode(hidden ? "eye-off" : "eye"));
+    });
+    field.append(input, toggle);
+    return field;
+  };
 
   const paint = (scrollToEnd = false) => {
     countChip.textContent = `${draft.length} 项`;
@@ -2416,9 +2481,13 @@ function openListEditor(options) {
       return;
     }
     draft.forEach((text, index) => {
-      const row = el("div", { class: "entry" });
-      row.append(el("span", { class: "entry-no" }, String(index + 1).padStart(2, "0")));
-      row.append(el("span", { class: "entry-text", title: text }, text));
+      const row = el("div", { class: secret ? "entry entry-secret" : "entry" });
+      if (secret) {
+        row.append(secretEntry(text, index));
+      } else {
+        row.append(el("span", { class: "entry-no" }, String(index + 1).padStart(2, "0")));
+        row.append(el("span", { class: "entry-text", title: text }, text));
+      }
       const remove = el(
         "button",
         { class: "entry-drop", type: "button", title: "删除这一项" },
