@@ -1849,20 +1849,24 @@ function openImage(imageId) {
   modal.append(shell);
   modal.classList.remove("hidden");
   const viewId = encodeURIComponent(imageId);
-  // The modal never pulls the original file: preview is a 2048px JPEG, with
-  // the grid thumb and only then the original as fallbacks.
-  picture.src = `${BASE}/gallery/preview?image_id=${viewId}`;
+  // Show the thumbnail immediately. GIFs can be large, so the animated preview
+  // is fetched in the background and swapped in only after it has loaded.
   if (!isVideo) {
+    const previewUrl = `${BASE}/gallery/preview?image_id=${viewId}`;
+    const thumbUrl = `${BASE}/gallery/thumb?image_id=${viewId}`;
+    picture.src = thumbUrl;
     picture.onerror = () => {
-      const step = picture.dataset.fallback || "";
-      if (!step) {
-        picture.dataset.fallback = "thumb";
-        picture.src = `${BASE}/gallery/thumb?image_id=${viewId}`;
-      } else if (step === "thumb") {
-        picture.dataset.fallback = "file";
-        picture.src = `${BASE}/gallery/file?image_id=${viewId}`;
-      }
+      if (picture.src !== thumbUrl) return;
+      picture.dataset.fallback = "file";
+      picture.src = `${BASE}/gallery/file?image_id=${viewId}`;
     };
+    const full = new Image();
+    full.decoding = "async";
+    full.onload = () => {
+      picture.onerror = null;
+      picture.src = previewUrl;
+    };
+    full.src = previewUrl;
   }
   loadImageDetail(imageId);
 }

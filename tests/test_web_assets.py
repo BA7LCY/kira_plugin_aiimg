@@ -83,8 +83,10 @@ def test_gallery_uses_binary_endpoints():
     assert "/gallery/preview?image_id=" in script
     assert "/gallery/file?image_id=" in script
     assert "/gallery/image?image_id=" not in script
-    # The viewer opens with the preview; the original is only a last resort.
-    assert 'picture.src = `${BASE}/gallery/preview' in script
+    # The viewer paints the thumbnail first, then swaps in the large preview.
+    assert 'picture.src = thumbUrl' in script
+    assert 'const full = new Image();' in script
+    assert 'picture.src = previewUrl' in script
 
 
 def test_gallery_gif_tiles_carry_a_gif_badge():
