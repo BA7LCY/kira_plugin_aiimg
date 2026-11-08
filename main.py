@@ -4296,7 +4296,10 @@ class AIImagePlugin(BasePlugin):
         from .core.image_format import guess_image_mime_and_ext
 
         mime, _ext = guess_image_mime_and_ext(raw)
-        if mime == "image/svg+xml":
+        # Animated GIFs and SVGs must keep their original bytes: a JPEG preview
+        # would drop the animation or the vector data. Static images still get
+        # the smaller 2048px preview.
+        if mime in ("image/svg+xml", "image/gif"):
             return FileResponse(
                 path,
                 media_type=mime,

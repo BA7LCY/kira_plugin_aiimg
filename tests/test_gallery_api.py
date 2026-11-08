@@ -1,12 +1,17 @@
 """Web API tests for gallery search, bulk actions and details."""
 
 import base64
+import sys
+import types
+from pathlib import Path
 
 from test_plugin_lifecycle import _Ctx, _config, plugin_module  # noqa: F401
 
 PNG_1PX = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 )
+GIF_1PX = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==")
+SVG_1PX = b'<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>'
 
 
 def _id(path) -> str:
@@ -168,6 +173,54 @@ async def test_gallery_item_returns_metadata(plugin_module, tmp_path):
 
         missing = await plugin.api_gallery_item("missing")
         assert missing == {"ok": False, "error": "图片不存在"}
+    finally:
+        await plugin.terminate()
+
+
+async def test_gallery_preview_keeps_gif_bytes(plugin_module, tmp_path, monkeypatch):
+    class FakeFileResponse:
+        def __init__(self, path, media_type=None, headers=None):
+            self.path = path
+            self.media_type = media_type
+            self.headers = headers or {}
+
+    class FakeResponse:
+        def __init__(self, status_code=200):
+            self.status_code = status_code
+
+    fake = types.ModuleType("fastapi.responses")
+    fake.FileResponse = FakeFileResponse
+    fake.Response = FakeResponse
+    monkeypatch.setitem(sys.modules, "fastapi", types.ModuleType("fastapi"))
+    monkeypatch.setitem(sys.modules, "fastapi.responses", fake)
+
+    plugin = await _start(plugin_module, tmp_path)
+    try:
+        path = await plugin._gallery.save_image(
+            GIF_1PX,
+            provider_id="p1",
+            model="m1",
+            size="1x1",
+            sid="s",
+            task_id="gif1",
+        )
+        response = await plugin.api_gallery_preview(_id(path))
+
+        assert response.media_type == "image/gif"
+        assert Path(response.path) == path
+
+        svg_path = await plugin._gallery.save_image(
+            SVG_1PX,
+            provider_id="p1",
+            model="m1",
+            size="1x1",
+            sid="s",
+            task_id="svg1",
+        )
+        svg_response = await plugin.api_gallery_preview(_id(svg_path))
+
+        assert svg_response.media_type == "image/svg+xml"
+        assert Path(svg_response.path) == svg_path
     finally:
         await plugin.terminate()
 

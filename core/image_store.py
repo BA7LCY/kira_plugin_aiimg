@@ -353,11 +353,14 @@ class ImageStore:
         gallery = self._config.get("gallery", {})
         if not isinstance(gallery, dict):
             gallery = {}
+        # Widths are intentionally fixed. They are not user settings: the grid
+        # and the modal both need predictable source sizes, and the original
+        # bytes remain available through the file endpoint.
         return {
-            "thumb_size": int(gallery.get("thumb_width") or 480),
+            "thumb_size": 480,
             "thumb_quality": int(gallery.get("thumb_quality") or 82),
             "thumb_format": str(gallery.get("thumb_format") or "webp"),
-            "preview_size": int(gallery.get("preview_size") or 2048),
+            "preview_size": 2048,
             "preview_quality": int(gallery.get("preview_quality") or 90),
             "preview_format": str(gallery.get("preview_format") or "jpeg"),
         }

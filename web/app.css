@@ -1921,32 +1921,36 @@ html[data-theme="dark"] .startup-banner {
     position: static;
     height: auto;
     flex-direction: row;
-    align-items: center;
-    gap: 10px;
-    padding: 10px 12px;
+    align-items: stretch;
+    gap: 6px;
+    padding: 8px 10px;
     border-right: 0;
     border-bottom: 1px solid var(--line);
-    overflow-x: auto;
+    overflow-x: hidden;
   }
 
+  /* The compact header is the navigation itself; the brand would steal the
+     width the five labels need and make them wrap into vertical columns. */
   .brand {
-    padding: 0 10px 0 2px;
-    border-bottom: 0;
-    border-right: 1px solid var(--line);
-  }
-
-  .brand small {
     display: none;
   }
 
   .nav {
+    flex: 1;
+    min-width: 0;
     flex-direction: row;
-    gap: 4px;
+    gap: 2px;
   }
 
   .nav-item {
+    flex: 1;
     width: auto;
-    padding: 7px 9px;
+    min-width: 0;
+    justify-content: center;
+    padding: 7px 4px;
+    gap: 6px;
+    white-space: nowrap;
+    font-size: 12px;
   }
 
   .nav-item .count {
@@ -1954,6 +1958,7 @@ html[data-theme="dark"] .startup-banner {
   }
 
   .rail-foot {
+    flex: none;
     margin: 0 0 0 auto;
     padding: 0;
     border: 0;
@@ -2014,6 +2019,19 @@ html[data-theme="dark"] .startup-banner {
     width: 100%;
     margin-left: 0;
     justify-content: flex-start;
+  }
+}
+
+@media (max-width: 420px) {
+  .nav-item {
+    gap: 0;
+    padding: 7px 2px;
+    font-size: 11px;
+  }
+
+  .nav-item .icon,
+  .rail-foot .version {
+    display: none;
   }
 }
 

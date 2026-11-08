@@ -364,14 +364,6 @@
         "default": 14,
         "note": "0 表示不限；收藏的视频过期也不会被删。两项都填时先删过期的，再删超出数量的。默认 14 天。"
       },
-      "thumb_width": {
-        "type": "integer",
-        "name": "缩略图宽度",
-        "default": 480,
-        "min": 64,
-        "max": 1024,
-        "note": "画廊列表缩略图的最长边。默认 480。"
-      },
       "thumb_quality": {
         "type": "integer",
         "name": "缩略图质量",
@@ -386,14 +378,6 @@
         "default": "webp",
         "options": ["webp", "jpeg"],
         "note": "webp 更小；jpeg 兼容性更好。默认 webp。"
-      },
-      "preview_size": {
-        "type": "integer",
-        "name": "预览图宽度",
-        "default": 2048,
-        "min": 128,
-        "max": 4096,
-        "note": "画廊弹窗预览图的最长边。默认 2048。"
       },
       "preview_quality": {
         "type": "integer",

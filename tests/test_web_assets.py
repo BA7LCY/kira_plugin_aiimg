@@ -393,10 +393,8 @@ def test_gallery_section_owns_the_encoding_knobs():
     fields = schema["section_gallery"]["fields"]
 
     for name in (
-        "thumb_width",
         "thumb_quality",
         "thumb_format",
-        "preview_size",
         "preview_quality",
         "preview_format",
     ):
@@ -405,6 +403,8 @@ def test_gallery_section_owns_the_encoding_knobs():
     assert fields["thumb_format"]["options"] == ["webp", "jpeg"]
     assert fields["preview_format"]["type"] == "select"
     assert fields["preview_format"]["options"] == ["jpeg", "webp"]
+    assert "thumb_width" not in fields
+    assert "preview_size" not in fields
 
 
 def test_settings_page_renders_select_fields_as_dropdowns():

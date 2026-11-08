@@ -51,13 +51,14 @@ def test_preview_honours_size_and_format():
     assert max(_size(webp)) == 300
 
 
-def test_store_uses_configured_suffixes(tmp_path):
+def test_store_uses_configured_suffixes_and_locked_widths(tmp_path):
     store = ImageStore(
         tmp_path,
         {
             "gallery": {
                 "thumb_format": "jpeg",
                 "preview_format": "webp",
+                # These two are no longer settings; stale values must not win.
                 "thumb_width": 160,
                 "preview_size": 320,
             },
@@ -68,8 +69,8 @@ def test_store_uses_configured_suffixes(tmp_path):
     assert store.preview_path("abc").suffix == ".webp"
 
     params = store.encoding_params()
-    assert params["thumb_size"] == 160
-    assert params["preview_size"] == 320
+    assert params["thumb_size"] == 480
+    assert params["preview_size"] == 2048
 
 
 def test_store_writes_derivatives_in_the_configured_format(tmp_path):
