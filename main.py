@@ -533,9 +533,16 @@ class AIImagePlugin(BasePlugin):
     def _apply_preset(self, prompt: str, preset: str, kind: str) -> tuple[str, str]:
         """Prepend a named preset to the caller's prompt; unknown names are ignored."""
         name = str(preset or "").strip()
-        if not name:
-            return prompt, ""
-        text = self._preset_map(kind).get(name.lower())
+        presets = self._preset_map(kind)
+        text = presets.get(name.lower()) if name else ""
+        if not text:
+            # The model sometimes sends just the preset name as the prompt and
+            # leaves preset empty or fills in something unknown. An exact name
+            # is still a hit; "手办化一下" is not.
+            candidate = str(prompt or "").strip().strip("。．.！!？?，,、 ")
+            if candidate.lower() in presets:
+                name = candidate
+                text = presets[candidate.lower()]
         if not text:
             return prompt, ""
         return f"{text} {str(prompt or '').strip()}".strip(), name

@@ -87,6 +87,16 @@ def test_gallery_uses_binary_endpoints():
     assert 'picture.src = `${BASE}/gallery/preview' in script
 
 
+def test_gallery_gif_tiles_carry_a_gif_badge():
+    script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+    css = (WEB_DIR / "app.css").read_text(encoding="utf-8")
+
+    assert 'class: "tile-format"' in script
+    assert 'if (imageFormat === "gif")' in script
+    assert 'el("span", { class: "tile-format" }, "GIF")' in script
+    assert ".tile .tile-format" in css
+
+
 def test_reference_row_pairs_the_upload_with_the_persona_switch():
     script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
     block = script.split("const persona = fields.selfie_use_persona;")[1].split("continue;")[0]

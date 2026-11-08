@@ -1633,6 +1633,9 @@ function galleryTile(image) {
       : imageFormat === "svg"
         ? "矢量图"
         : galleryKindLabel(image.kind);
+  if (imageFormat === "gif") {
+    tile.append(el("span", { class: "tile-format" }, "GIF"));
+  }
   tile.append(
     el(
       "div",

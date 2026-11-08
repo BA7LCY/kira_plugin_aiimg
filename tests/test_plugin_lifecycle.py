@@ -691,12 +691,16 @@ def test_append_fallback_keeps_order(plugin_module, tmp_path):
 def test_preset_lookup_and_apply(plugin_module, tmp_path):
     config = _config()
     config["section_prompts"]["draw_presets"] = ["手办化:Transform into a figurine", "坏行"]
+    config["section_prompts"]["edit_presets"] = ["手办化:Transform into a photo figurine"]
     config["section_prompts"]["video_presets"] = ["运镜:慢速推近"]
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
 
     prompt, name = plugin._apply_preset("一只猫", "手办化", "generate")
     unchanged, missing = plugin._apply_preset("一只猫", "没有", "generate")
     video_prompt, video_name = plugin._apply_preset("一只猫在跑", "运镜", "video")
+    by_name, by_name_hit = plugin._apply_preset("手办化", "", "edit")
+    bogus_prompt, bogus_hit = plugin._apply_preset("手办化", "不存在的预设", "edit")
+    not_a_name, no_hit = plugin._apply_preset("手办化一下", "", "edit")
 
     assert name == "手办化"
     assert prompt.startswith("Transform into a figurine")
@@ -704,6 +708,12 @@ def test_preset_lookup_and_apply(plugin_module, tmp_path):
     assert missing == ""
     assert video_name == "运镜"
     assert video_prompt == "慢速推近 一只猫在跑"
+    assert by_name_hit == "手办化"
+    assert by_name == "Transform into a photo figurine 手办化"
+    assert bogus_hit == "手办化"
+    assert bogus_prompt == "Transform into a photo figurine 手办化"
+    assert no_hit == ""
+    assert not_a_name == "手办化一下"
 
 
 def _ref_file(path: Path, data: bytes = b"") -> Path:
