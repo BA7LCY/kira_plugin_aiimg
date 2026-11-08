@@ -3051,29 +3051,9 @@ class AIImagePlugin(BasePlugin):
             {"provider": p, "output": ""} for p in record.chain
         ]
         image_params = dict(record.extra.get("image_params") or {})
-        expected_format = str(image_params.get("output_format") or "").strip().lower()
-        if expected_format in ("gif", "svg"):
-            capability = f"supports_{expected_format}"
-            kept = []
-            for item in chain_items:
-                try:
-                    provider_settings = self._registry.get_settings(item["provider"])
-                except KeyError:
-                    continue
-                if bool(getattr(provider_settings, capability, False)):
-                    kept.append(item)
-                else:
-                    logger.info(
-                        "[aiimg] 任务 %s 跳过服务商 %s：没有声明支持 %s",
-                        record.task_id,
-                        item["provider"],
-                        expected_format.upper(),
-                    )
-            if not kept:
-                raise RuntimeError(
-                    f"没有服务商支持 {expected_format.upper()}，请先在服务商里打开这项能力"
-                )
-            chain_items = kept
+        # No pre-flight format filtering: gif/svg requests go through the whole
+        # chain, and a provider that answers in another format is skipped by
+        # FormatMismatchError from the strict MIME check after the request.
         last_error = ""
         upcoming = [item["provider"] for item in chain_items]
         logger.info(

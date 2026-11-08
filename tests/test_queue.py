@@ -1,6 +1,7 @@
 """TaskQueue concurrency, limits and finish-callback tests."""
 
 import asyncio
+import json
 import logging
 
 import pytest
@@ -379,4 +380,79 @@ def test_resume_runner_takes_over_an_interrupted_task(tmp_path):
     assert resumed[0][1] >= 1
     assert store.get(task_id).status == "succeeded"
     assert store.get(task_id).owner == ""
+    store.close()
+
+
+@pytest.mark.parametrize("kind", ["generate_image", "generate_image_batch"])
+def test_success_records_the_provider_that_actually_answered(tmp_path, kind):
+    """A chain may fall through; the row must name the provider that answered.
+
+    The runner only edits the in-memory record, so the queue has to take the
+    provider from the result it returns -- otherwise the stale name the task
+    was queued with gets written back (and logged) after a successful run.
+    """
+    store, q = _queue(tmp_path, max_running=1)
+    finished = []
+
+    async def cb(record):
+        finished.append((record.status, record.provider))
+
+    q.on_finished(cb)
+
+    async def runner(rec):
+        await asyncio.sleep(0.01)
+        return {"media": ["/x.png"], "provider": "lh"}
+
+    async def scenario():
+        await q.start()
+        task_id = store.create(
+            kind=kind,
+            user_id="u1",
+            prompt="猫",
+            provider="fair",
+            chain=["fair", "lh"],
+        ).task_id
+        await q.submit(store.get(task_id), runner)
+        await _wait_status(store, task_id, {"succeeded"})
+        await q.stop()
+        return task_id
+
+    task_id = asyncio.run(scenario())
+
+    got = store.get(task_id)
+    assert got.provider == "lh"
+    assert json.loads(got.result)["provider"] == "lh"
+    # The finished callback is what the "结束" log and the notice read.
+    assert finished == [("succeeded", "lh")]
+    store.close()
+
+
+def test_success_without_result_provider_keeps_the_queued_provider(tmp_path):
+    """Runners that do not report a provider keep the one the task had."""
+    store, q = _queue(tmp_path, max_running=1)
+    finished = []
+
+    async def cb(record):
+        finished.append(record.provider)
+
+    q.on_finished(cb)
+
+    async def runner(rec):
+        await asyncio.sleep(0.01)
+        return {"media": ["/x.png"]}
+
+    async def scenario():
+        await q.start()
+        task_id = store.create(
+            kind="generate_image", user_id="u1", provider="fair"
+        ).task_id
+        await q.submit(store.get(task_id), runner)
+        await _wait_status(store, task_id, {"succeeded"})
+        await q.stop()
+        return task_id
+
+    task_id = asyncio.run(scenario())
+
+    assert store.get(task_id).provider == "fair"
+    assert finished == ["fair"]
     store.close()

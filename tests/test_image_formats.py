@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import io
 
@@ -9,8 +10,11 @@ import pytest
 
 from core.image_format import validate_image_bytes, validate_svg_bytes
 from core.image_params import build_image_params
-from core.providers.base import FormatMismatchError, ProviderSettings
+from core.provider_stats import ProviderStats
+from core.providers.base import FormatMismatchError, ImageResult, ProviderSettings
 from core.providers.openai_compat import OpenAICompatBackend
+from core.task_store import TaskRecord
+from test_plugin_lifecycle import _Ctx, _config, plugin_module  # noqa: F401
 
 
 def _backend() -> OpenAICompatBackend:
@@ -213,3 +217,142 @@ def test_svg_scripts_are_refused():
             b'<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>',
             allow_svg=False,
         )
+
+
+# ----------------------------------------------------------------------
+# gif/svg chains: no provider may be dropped before the request
+# ----------------------------------------------------------------------
+
+class _ChainSettings:
+    """Provider settings without any gif/svg capability switch."""
+
+    def __init__(self) -> None:
+        self.max_concurrent = 0
+        self.default_size = "1024x1024"
+
+
+class _ChainRegistry:
+    def __init__(self, backends: dict) -> None:
+        self._backends = backends
+        self._settings = {provider_id: _ChainSettings() for provider_id in backends}
+
+    def get_backend(self, provider_id):
+        if provider_id not in self._backends:
+            raise KeyError(provider_id)
+        return self._backends[provider_id]
+
+    def get_settings(self, provider_id):
+        if provider_id not in self._settings:
+            raise KeyError(provider_id)
+        return self._settings[provider_id]
+
+
+class _ChainGallery:
+    def __init__(self) -> None:
+        self.saved: list[bytes] = []
+
+    async def save_image(self, data, **kwargs):
+        self.saved.append(data)
+        return f"media/fake-{len(self.saved)}.gif"
+
+
+class _ChainStore:
+    def set_audit(self, *args, **kwargs):
+        return None
+
+
+class _ChainBackend:
+    """Records the extra payload each chain step handed to the provider."""
+
+    supports_edit = True
+
+    def __init__(self, *, result=None, error=None) -> None:
+        self.result = list(result or [])
+        self.error = error
+        self.calls: list[dict] = []
+
+    async def generate(self, prompt, *, intent=None, size_hint="", model="", extra=None):
+        self.calls.append(dict(extra or {}))
+        if self.error is not None:
+            raise self.error
+        return list(self.result)
+
+    async def edit(self, prompt, images, *, intent=None, size_hint="", model="", extra=None):
+        return await self.generate(prompt, extra=extra)
+
+
+def _chain_plugin(plugin_module, tmp_path, backends):
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), _config())
+    plugin._data_dir = tmp_path
+    plugin._registry = _ChainRegistry(backends)
+    plugin._stats = ProviderStats(tmp_path / "stats", threshold=3, cooldown=60)
+    plugin._gallery = _ChainGallery()
+    plugin._store = _ChainStore()
+    return plugin
+
+
+def _gif_record(chain):
+    return TaskRecord(
+        task_id="t-gif",
+        kind="generate_image",
+        prompt="用 aiimg 做一张循环动画 GIF，9 帧",
+        chain=list(chain),
+        extra={
+            "chain_items": [{"provider": p, "output": ""} for p in chain],
+            "image_params": {
+                "output_format": "gif",
+                "frame_count": 9,
+                "frame_duration_ms": 200,
+            },
+        },
+    )
+
+
+def test_provider_settings_expose_no_gif_svg_capability_switches():
+    """0.5.2 deleted these switches; a chain filter reading them can only fail."""
+    settings = ProviderSettings(id="mock", template_key="openai_images")
+    assert not hasattr(settings, "supports_gif")
+    assert not hasattr(settings, "supports_svg")
+
+
+def test_gif_request_tries_every_provider_instead_of_pre_filtering(plugin_module, tmp_path):
+    first = _ChainBackend(error=FormatMismatchError("服务商 first 返回 image/png，请求的是 gif"))
+    second = _ChainBackend(error=FormatMismatchError("服务商 second 返回 image/png，请求的是 gif"))
+    plugin = _chain_plugin(plugin_module, tmp_path, {"first": first, "second": second})
+
+    with pytest.raises(RuntimeError) as excinfo:
+        asyncio.run(
+            plugin._run_image_chain(_gif_record(["first", "second"]), kind="generate")
+        )
+
+    # Both providers were asked for a GIF, with the request parameters intact.
+    assert len(first.calls) == 1
+    assert len(second.calls) == 1
+    assert first.calls[0]["output_format"] == "gif"
+    assert second.calls[0]["output_format"] == "gif"
+    assert second.calls[0]["frame_count"] == 9
+    # The failure is the chain summary, not a missing-capability refusal.
+    message = str(excinfo.value)
+    assert "所有服务商均失败" in message
+    assert "没有服务商支持" not in message
+
+
+def test_gif_request_reaches_the_provider_that_returns_a_gif(plugin_module, tmp_path):
+    plain = _ChainBackend(error=FormatMismatchError("服务商 plain 返回 image/png，请求的是 gif"))
+    animated = _ChainBackend(
+        result=[
+            ImageResult(
+                data=_gif(), mime="image/gif", ext="gif", size="512x512", model="mock"
+            )
+        ]
+    )
+    plugin = _chain_plugin(plugin_module, tmp_path, {"plain": plain, "animated": animated})
+
+    result = asyncio.run(
+        plugin._run_image_chain(_gif_record(["plain", "animated"]), kind="generate")
+    )
+
+    assert result["provider"] == "animated"
+    assert len(result["media"]) == 1
+    assert plain.calls[0]["output_format"] == "gif"
+    assert animated.calls[0]["output_format"] == "gif"

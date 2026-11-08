@@ -425,10 +425,18 @@ class TaskQueue:
             logger.info("任务 %s 已出结果但先前被取消，按取消收尾", task_id)
             await self._finish(fresh)
             return
+        # The runner is the only place that knows which provider actually
+        # produced the result: a chain may fall through to a later provider
+        # while the stored record still names the one the task started with.
+        # Recording the stale name here made the task row and the "finished"
+        # log disagree with the gallery.
+        succeeded_provider = ""
+        if isinstance(result, dict):
+            succeeded_provider = str(result.get("provider") or "").strip()
         self._store.set_result(
             task_id,
             json.dumps(result, ensure_ascii=False),
-            provider=fresh.provider,
+            provider=succeeded_provider or fresh.provider,
         )
         fresh = self._store.get(task_id) or fresh
         logger.info(
