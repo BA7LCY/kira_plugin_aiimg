@@ -4283,7 +4283,7 @@ class AIImagePlugin(BasePlugin):
             headers={"Cache-Control": "private, max-age=31536000, immutable"},
         )
     @register.api(method="GET", path="/aiimg/gallery/preview", auth=True, summary="画廊预览图")
-    async def api_gallery_preview(self, image_id: str):
+    async def api_gallery_preview(self, image_id: str, format: str = ""):
         from fastapi.responses import FileResponse, Response
 
         record = self._gallery.get(image_id) if self._gallery else None
@@ -4299,10 +4299,43 @@ class AIImagePlugin(BasePlugin):
         # Animated GIFs and SVGs must keep their original bytes: a JPEG preview
         # would drop the animation or the vector data. Static images still get
         # the smaller 2048px preview.
-        if mime in ("image/svg+xml", "image/gif"):
+        if mime == "image/svg+xml":
             return FileResponse(
                 path,
                 media_type=mime,
+                headers={"Cache-Control": "private, max-age=31536000, immutable"},
+            )
+        if mime == "image/gif":
+            from .core.image_store import ImageStore
+
+            if str(format).strip().lower() == "webp":
+                webp_preview = self._gallery.gif_webp_preview_path(image_id)
+                if not webp_preview.is_file():
+                    from .core.image_format import preview_webp
+
+                    data = await asyncio.to_thread(preview_webp, raw)
+                    if data.startswith(b"RIFF"):
+                        await asyncio.to_thread(
+                            ImageStore._atomic_write, webp_preview, data
+                        )
+                if webp_preview.is_file():
+                    return FileResponse(
+                        webp_preview,
+                        media_type="image/webp",
+                        headers={
+                            "Cache-Control": "private, max-age=31536000, immutable"
+                        },
+                    )
+                # Tiny GIFs can be smaller than their WebP; fall through to GIF.
+            gif_preview = self._gallery.gif_preview_path(image_id)
+            if not gif_preview.is_file():
+                from .core.image_format import preview_gif
+
+                data = await asyncio.to_thread(preview_gif, raw)
+                await asyncio.to_thread(ImageStore._atomic_write, gif_preview, data)
+            return FileResponse(
+                gif_preview,
+                media_type="image/gif",
                 headers={"Cache-Control": "private, max-age=31536000, immutable"},
             )
         preview = self._gallery.preview_path(image_id)

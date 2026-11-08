@@ -344,6 +344,14 @@ class ImageStore:
         suffix = ".webp" if fmt == "webp" else ".jpg"
         return self.preview_dir / f"{safe or 'image'}{suffix}"
 
+    def gif_preview_path(self, image_id: str) -> Path:
+        safe = "".join(ch for ch in str(image_id) if ch.isalnum() or ch in "-_")
+        return self.preview_dir / f"{safe or 'image'}.gif"
+
+    def gif_webp_preview_path(self, image_id: str) -> Path:
+        safe = "".join(ch for ch in str(image_id) if ch.isalnum() or ch in "-_")
+        return self.preview_dir / f"{safe or 'image'}.gif.webp"
+
     def encoding_params(self) -> dict:
         """Public view of the advanced encoding knobs."""
         return self._encoding_params()
@@ -443,7 +451,13 @@ class ImageStore:
             self._remove_files(image_id, path)
 
     def _remove_files(self, image_id: str, path: str) -> None:
-        for target in (path, self.thumb_path(image_id), self.preview_path(image_id)):
+        for target in (
+            path,
+            self.thumb_path(image_id),
+            self.preview_path(image_id),
+            self.gif_preview_path(image_id),
+            self.gif_webp_preview_path(image_id),
+        ):
             try:
                 os.remove(target)
             except OSError:

@@ -87,6 +87,7 @@ def test_gallery_uses_binary_endpoints():
     assert 'picture.src = thumbUrl' in script
     assert 'const full = new Image();' in script
     assert 'picture.src = previewUrl' in script
+    assert '&format=webp' in script
 
 
 def test_gallery_gif_tiles_carry_a_gif_badge():

@@ -207,7 +207,9 @@ async def test_gallery_preview_keeps_gif_bytes(plugin_module, tmp_path, monkeypa
         response = await plugin.api_gallery_preview(_id(path))
 
         assert response.media_type == "image/gif"
-        assert Path(response.path) == path
+        assert Path(response.path).suffix == ".gif"
+        assert Path(response.path) != path
+        assert Path(response.path).read_bytes().startswith((b"GIF87a", b"GIF89a"))
 
         svg_path = await plugin._gallery.save_image(
             SVG_1PX,

@@ -211,6 +211,84 @@ def thumbnail_webp(
         return data
 
 
+def preview_gif(data: bytes, size: int = 360, colors: int = 96) -> bytes:
+    """Shrink an animated GIF for the gallery modal while keeping it animated.
+
+    The original file remains untouched for download; this variant exists only
+    to make the first preview load smaller on slow connections. A failure falls
+    back to the original bytes.
+    """
+    try:
+        from PIL import Image as PILImage
+        from PIL import ImageSequence
+
+        with PILImage.open(io.BytesIO(data)) as image:
+            frames = []
+            durations = []
+            for frame in ImageSequence.Iterator(image):
+                copy = frame.convert("RGB")
+                copy.thumbnail((size, size), PILImage.Resampling.LANCZOS)
+                paletted = copy.convert(
+                    "P", palette=PILImage.Palette.ADAPTIVE, colors=max(8, min(colors, 256))
+                )
+                frames.append(paletted)
+                durations.append(int(frame.info.get("duration", image.info.get("duration", 100))))
+            if not frames:
+                return data
+            output = io.BytesIO()
+            frames[0].save(
+                output,
+                format="GIF",
+                save_all=True,
+                append_images=frames[1:],
+                duration=durations,
+                loop=0,
+                optimize=True,
+                disposal=2,
+            )
+            result = output.getvalue()
+            return result if len(result) < len(data) else data
+    except Exception:
+        return data
+
+
+def preview_webp(data: bytes, size: int = 480, quality: int = 60) -> bytes:
+    """Animated WebP preview for GIFs; much smaller than the source GIF.
+
+    The gallery still downloads the original GIF. This variant is only used by
+    the modal, where an animated WebP loops the same way and decodes fast.
+    """
+    try:
+        from PIL import Image as PILImage
+        from PIL import ImageSequence
+
+        with PILImage.open(io.BytesIO(data)) as image:
+            frames = []
+            durations = []
+            for frame in ImageSequence.Iterator(image):
+                copy = frame.convert("RGBA")
+                copy.thumbnail((size, size), PILImage.Resampling.LANCZOS)
+                frames.append(copy.convert("RGB"))
+                durations.append(int(frame.info.get("duration", image.info.get("duration", 100))))
+            if not frames:
+                return data
+            output = io.BytesIO()
+            frames[0].save(
+                output,
+                format="WEBP",
+                save_all=True,
+                append_images=frames[1:],
+                duration=durations,
+                loop=0,
+                quality=quality,
+                method=6,
+            )
+            result = output.getvalue()
+            return result if len(result) < len(data) else data
+    except Exception:
+        return data
+
+
 def preview_jpeg(
     data: bytes, size: int = 2048, quality: int = 90, fmt: str = "jpeg"
 ) -> bytes:

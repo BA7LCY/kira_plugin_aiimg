@@ -1852,7 +1852,9 @@ function openImage(imageId) {
   // Show the thumbnail immediately. GIFs can be large, so the animated preview
   // is fetched in the background and swapped in only after it has loaded.
   if (!isVideo) {
-    const previewUrl = `${BASE}/gallery/preview?image_id=${viewId}`;
+    const isGif = String(image?.format || "").toLowerCase() === "gif";
+    const fallbackUrl = `${BASE}/gallery/preview?image_id=${viewId}`;
+    const previewUrl = isGif ? `${fallbackUrl}&format=webp` : fallbackUrl;
     const thumbUrl = `${BASE}/gallery/thumb?image_id=${viewId}`;
     picture.src = thumbUrl;
     picture.onerror = () => {
@@ -1865,6 +1867,11 @@ function openImage(imageId) {
     full.onload = () => {
       picture.onerror = null;
       picture.src = previewUrl;
+    };
+    full.onerror = () => {
+      if (isGif && full.src !== fallbackUrl) {
+        full.src = fallbackUrl;
+      }
     };
     full.src = previewUrl;
   }
