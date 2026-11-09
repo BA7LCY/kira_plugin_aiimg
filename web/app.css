@@ -387,6 +387,7 @@ html[data-theme="dark"] .note.warn {
 /* -- cards ------------------------------------------------------------ */
 
 .card {
+  min-width: 0;
   border: 1px solid var(--line);
   border-radius: var(--radius);
   background: var(--surface);
@@ -397,13 +398,22 @@ html[data-theme="dark"] .note.warn {
   display: flex;
   align-items: center;
   gap: 10px;
+  min-width: 0;
   padding: 12px 16px;
   border-bottom: 1px solid var(--line);
 }
 
 .card-head h2 {
+  min-width: 0;
+  overflow: hidden;
   font-size: 13px;
   font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.card-head > .btn {
+  flex: none;
 }
 
 .card-head .sub {
@@ -416,6 +426,7 @@ html[data-theme="dark"] .note.warn {
 }
 
 .card-body {
+  min-width: 0;
   padding: 16px;
 }
 
@@ -491,6 +502,11 @@ html[data-theme="dark"] .note.warn {
   grid-template-columns: 280px minmax(0, 1fr);
   gap: 16px;
   align-items: start;
+  min-width: 0;
+}
+
+.split > * {
+  min-width: 0;
 }
 
 .panel-list {
@@ -596,6 +612,7 @@ html[data-theme="dark"] .note.warn {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px 16px;
+  min-width: 0;
 }
 
 .field {

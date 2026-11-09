@@ -263,10 +263,15 @@ def test_api_keys_use_the_list_item_editor():
     assert "return providerKeysField(provider);" in script
     assert 'title: `${fieldLabel("api_keys")}列表`' in script
     # Opening the key editor asks for the full keys; the page itself only has masks.
+    # A newly added, unsaved provider has no server id yet, so it edits its local list.
     assert "async function providerFullKeys(providerId)" in script
     assert 'api("/provider_keys"' in script
-    assert "items = await providerFullKeys(provider.id);" in script
-    # The editor adds one item per Enter press and can take a pasted block.
+    assert "const savedId = state.providerSavedIds.get(provider);" in script
+    assert "items = await providerFullKeys(savedId);" in script
+    assert "state.providerSavedIds.set(provider, provider.id);" in script
+    # A provider that is still referenced by a chain must not disappear silently.
+    assert "function providerChainNames(providerId)" in script
+    assert "先从功能链路移除" in script
     assert "function openListEditor(options)" in script
     assert "function openListImport(options)" in script
     assert "输入一项后按回车添加" in script

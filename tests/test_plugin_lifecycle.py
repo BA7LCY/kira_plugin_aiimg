@@ -259,6 +259,30 @@ def _config():
     }
 
 
+def test_housekeeping_cleans_the_gallery(monkeypatch, plugin_module, tmp_path):
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), _config())
+    calls = []
+
+    class Gallery:
+        async def cleanup(self):
+            calls.append(True)
+            plugin._ready = False
+
+    real_sleep = plugin_module.asyncio.sleep
+
+    async def fast_sleep(delay):
+        if delay < 300:
+            await real_sleep(0)
+
+    plugin._gallery = Gallery()
+    plugin._ready = True
+    monkeypatch.setattr(plugin_module.asyncio, "sleep", fast_sleep)
+
+    asyncio.run(plugin._deferred_housekeeping())
+
+    assert calls == [True]
+
+
 def test_config_reads_plugin_cfg(plugin_module, tmp_path):
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), _config())
 

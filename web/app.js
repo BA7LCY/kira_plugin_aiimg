@@ -65,6 +65,7 @@ const state = {
   fields: {},
   features: [],
   providerDefaults: {},
+  providerSavedIds: new WeakMap(),
   required: {},
   status: {},
   notes: [],
@@ -158,12 +159,22 @@ function toast(message, tone = "info") {
 
 // -- data -------------------------------------------------------------
 
+// Remember which object came from the server. A newly added provider has no
+// entry yet, so opening its key list must not ask the API for a provider that
+// has never been saved.
+function rememberProviderOrigins() {
+  for (const provider of state.config?.providers || []) {
+    state.providerSavedIds.set(provider, provider.id);
+  }
+}
+
 // One response carries everything the form needs; only `status` and `notes`
 // touch the gallery, the queue and the provider ledger, so they can arrive
 // later without holding the first paint hostage.
 function applyConfig(data) {
   state.config = data.config || {};
   state.original = structuredClone(state.config);
+  rememberProviderOrigins();
   state.revision = data.revision || "";
   state.sections = data.sections || {};
   state.templates = data.templates || [];
@@ -290,6 +301,7 @@ async function save(allowReload = false) {
       if (!(key in scopePayload(saved, scope))) keep[key] = state.config[key];
     }
     state.config = { ...saved, ...keep };
+    rememberProviderOrigins();
     state.original = structuredClone(saved);
     state.revision = data.revision || state.revision;
     state.status = data.status || state.status;
@@ -872,7 +884,7 @@ function renderProviderEditor() {
       el("span", { class: "spacer" }),
       el(
         "button",
-        { class: "btn small danger", type: "button", "data-action": "provider-delete" },
+        { class: "btn small danger", type: "button", "data-action": "provider-delete", title: "删除服务商" },
         iconNode("trash"),
         "删除"
       )
@@ -2390,9 +2402,10 @@ async function openListEditorFor(target, title) {
     let items = (
       Array.isArray(provider[field]) ? provider[field] : listValueItems(provider[field])
     ).map((item) => String(item || "").trim());
-    if (field === "api_keys" && provider.id) {
+    const savedId = state.providerSavedIds.get(provider);
+    if (field === "api_keys" && savedId) {
       try {
-        items = await providerFullKeys(provider.id);
+        items = await providerFullKeys(savedId);
       } catch (error) {
         toast(String(error.message || error), "error");
         return;
@@ -3032,16 +3045,24 @@ function addProvider() {
   render();
 }
 
+function providerChainNames(providerId) {
+  return Object.entries(state.config.chains || {})
+    .filter(([, chain]) => (chain || []).some((item) => item.provider === providerId))
+    .map(([feature]) => feature);
+}
+
 function deleteProvider() {
   const provider = selectedProvider();
   if (!provider) return;
-  if (!window.confirm(`删除服务商「${provider.id}」？链路里引用它的条目也会一起移除。`)) {
+  const used = providerChainNames(provider.id);
+  if (used.length) {
+    toast(`先从功能链路移除「${used.join("、")}」里的这个服务商`, "error");
+    return;
+  }
+  if (!window.confirm(`删除服务商「${provider.id}」？`)) {
     return;
   }
   state.config.providers = state.config.providers.filter((item) => item.id !== provider.id);
-  for (const [feature, chain] of Object.entries(state.config.chains || {})) {
-    state.config.chains[feature] = (chain || []).filter((item) => item.provider !== provider.id);
-  }
   state.selected = state.config.providers[0]?.id || null;
   render();
 }
