@@ -1,15 +1,28 @@
+# Python
 __pycache__/
 *.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
 .testdeps/
 .pytest_tmp/
+.coverage
+htmlcov/
+
+# Local scratch
 .tmp/
-_tmp/
-_tmp5/
-_t5/
-_t6/
-_compile_check.py
+_tmp*/
+*.log
+*.bak
+*.orig
 *.zip
 
-# Source artwork kept outside the package
-1.jpg
+# Editors and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
