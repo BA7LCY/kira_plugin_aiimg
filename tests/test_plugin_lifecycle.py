@@ -2053,6 +2053,61 @@ async def _ready_plugin(plugin_module, tmp_path):
     return plugin, data_dir
 
 
+def test_image_chain_skips_providers_without_keys(plugin_module, tmp_path):
+    keyless = {
+        "id": "no-key",
+        "template_key": "openai_images",
+        "base_url": "https://no-key.test/v1",
+        "model": "gpt-image-2",
+    }
+    ready = {
+        **keyless,
+        "id": "ready",
+        "base_url": "https://ready.test/v1",
+        "api_keys": ["sk-test"],
+    }
+    config = _config()
+    config["providers"] = [keyless, ready]
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
+    plugin._registry = plugin_module.ProviderRegistry(config, data_dir=tmp_path)
+
+    assert [item.provider_id for item in plugin._image_chain("generate_image")] == [
+        "ready"
+    ]
+    assert plugin._tool_available("generate_image", _tool_event()) is True
+
+    config["providers"] = [keyless]
+    plugin._registry = plugin_module.ProviderRegistry(config, data_dir=tmp_path)
+    assert plugin._image_chain("generate_image") == []
+    assert plugin._tool_available("generate_image", _tool_event()) is False
+
+
+async def test_generate_image_refuses_when_the_only_provider_has_no_key(
+    plugin_module, tmp_path
+):
+    data_dir = tmp_path / "data"
+    config = _config()
+    config["providers"] = [
+        {
+            "id": "no-key",
+            "template_key": "openai_images",
+            "base_url": "https://no-key.test/v1",
+            "model": "gpt-image-2",
+        }
+    ]
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), config)
+    await plugin.initialize()
+    try:
+        payload = json.loads(
+            await plugin.generate_image(_memory_event("s1"), prompt="一只猫")
+        )
+        assert payload["status"] == "denied"
+        assert payload["reason"] == "没有可用的服务商接口"
+        assert plugin._store.list_recent() == []
+    finally:
+        await plugin.terminate()
+
+
 async def test_find_image_lists_only_this_session(plugin_module, tmp_path):
     plugin, data_dir = await _ready_plugin(plugin_module, tmp_path)
     mine = _png(data_dir / "out" / "a.png")

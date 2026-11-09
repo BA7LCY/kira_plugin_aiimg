@@ -832,18 +832,42 @@ class AIImagePlugin(BasePlugin):
     # chains
     # ------------------------------------------------------------------
 
+    def _provider_has_interface(self, provider_id: str) -> bool:
+        """A provider without a key cannot accept work.
+
+        Image/video backends always send a bearer token, so a configured
+        provider with an empty key list is only a placeholder. Treat it as
+        unavailable at admission instead of accepting a task that is guaranteed
+        to fail in the worker.
+        """
+        getter = getattr(self._registry, "get_settings", None)
+        if getter is None:
+            return True
+        settings = getter(provider_id)
+        return bool(getattr(settings, "api_keys", []))
+
     def _first_image_provider(self) -> str:
         ids = self._registry.image_provider_ids() if self._registry else []
-        return ids[0] if ids else ""
+        for provider_id in ids:
+            if self._provider_has_interface(provider_id):
+                return provider_id
+        return ""
 
     def _first_video_provider(self) -> str:
         ids = self._registry.video_provider_ids() if self._registry else []
-        return ids[0] if ids else ""
+        for provider_id in ids:
+            if self._provider_has_interface(provider_id):
+                return provider_id
+        return ""
 
     def _image_chain(self, feature: str) -> list[ChainItem]:
         if not self._registry:
             return []
-        available = set(self._registry.image_provider_ids())
+        available = {
+            provider_id
+            for provider_id in self._registry.image_provider_ids()
+            if self._provider_has_interface(provider_id)
+        }
         chains = self._provider_config()["chains"] or {}
         items = chain_for(chains, feature, available=available, default_provider=self._first_image_provider())
         return self._append_fallback(items, sorted(available))
@@ -873,7 +897,11 @@ class AIImagePlugin(BasePlugin):
     def _video_chain(self) -> list[ChainItem]:
         if not self._registry:
             return []
-        available = set(self._registry.video_provider_ids())
+        available = {
+            provider_id
+            for provider_id in self._registry.video_provider_ids()
+            if self._provider_has_interface(provider_id)
+        }
         chains = self._provider_config()["chains"] or {}
         items = chain_for(chains, "generate_video", available=available, default_provider=self._first_video_provider())
         return self._append_fallback(items, sorted(available))
@@ -1008,7 +1036,7 @@ class AIImagePlugin(BasePlugin):
             return "提示词不能为空"
         chain = self._image_chain(kind)
         if not chain:
-            return self._denied(kind, "没有服务商")
+            return self._denied(kind, "没有可用的服务商接口")
         if provider:
             chain = [item for item in chain if item.provider_id == provider]
             if not chain:
@@ -1693,7 +1721,7 @@ class AIImagePlugin(BasePlugin):
             return self._denied("generate_selfie", "参考图来源不明")
         chain = self._selfie_chain()
         if not chain:
-            return self._denied("generate_selfie", "没有服务商")
+            return self._denied("generate_selfie", "没有可用的服务商接口")
         try:
             image_params = self._image_params(
                 n=n,
@@ -1799,7 +1827,7 @@ class AIImagePlugin(BasePlugin):
             return self._denied("generate_image", "没有提示词")
         chain = self._image_chain("generate_image")
         if not chain:
-            return self._denied("generate_image", "没有服务商")
+            return self._denied("generate_image", "没有可用的服务商接口")
         if provider:
             chain = [item for item in chain if item.provider_id == provider]
             if not chain:
@@ -1946,7 +1974,7 @@ class AIImagePlugin(BasePlugin):
             return self._denied("generate_video", "功能关闭")
         chain = self._video_chain()
         if not chain:
-            return self._denied("generate_video", "没有服务商")
+            return self._denied("generate_video", "没有可用的服务商接口")
         seconds_text = str(seconds or "").strip()
         if seconds_text:
             if not seconds_text.isdigit():
