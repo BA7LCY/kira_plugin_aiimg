@@ -196,6 +196,9 @@ async def test_gallery_preview_keeps_gif_bytes(plugin_module, tmp_path, monkeypa
 
     plugin = await _start(plugin_module, tmp_path)
     try:
+        status = await plugin.api_status()
+        assert status["gallery"]["encoding_version"]
+
         path = await plugin._gallery.save_image(
             GIF_1PX,
             provider_id="p1",
@@ -207,6 +210,7 @@ async def test_gallery_preview_keeps_gif_bytes(plugin_module, tmp_path, monkeypa
         response = await plugin.api_gallery_preview(_id(path))
 
         assert response.media_type == "image/gif"
+        assert response.headers["Cache-Control"] == "private, max-age=86400, no-transform"
         assert Path(response.path).suffix == ".gif"
         assert Path(response.path) != path
         assert Path(response.path).read_bytes().startswith((b"GIF87a", b"GIF89a"))
@@ -222,7 +226,25 @@ async def test_gallery_preview_keeps_gif_bytes(plugin_module, tmp_path, monkeypa
         svg_response = await plugin.api_gallery_preview(_id(svg_path))
 
         assert svg_response.media_type == "image/svg+xml"
+        assert svg_response.headers["Cache-Control"] == "private, max-age=86400, no-transform"
         assert Path(svg_response.path) == svg_path
+
+        png_path = await plugin._gallery.save_image(
+            PNG_1PX,
+            provider_id="p1",
+            model="m1",
+            size="1x1",
+            sid="s",
+            task_id="png1",
+        )
+        png_id = _id(png_path)
+        thumb_response = await plugin.api_gallery_thumb(png_id)
+        preview_response = await plugin.api_gallery_preview(png_id)
+        file_response = await plugin.api_gallery_file(png_id)
+
+        assert thumb_response.headers["Cache-Control"] == "private, max-age=604800, no-transform"
+        assert preview_response.headers["Cache-Control"] == "private, max-age=86400, no-transform"
+        assert file_response.headers["Cache-Control"] == "no-store"
     finally:
         await plugin.terminate()
 

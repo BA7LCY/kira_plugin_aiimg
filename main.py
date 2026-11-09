@@ -94,6 +94,9 @@ _NOTIFY_MARKER = "_aiimg_task"
 _ERROR_MARKER = "_aiimg_task_error"
 # How long a submitted task may still be waiting for its acknowledgement.
 _ACK_WATCH_TTL = 300.0
+_THUMB_CACHE = "private, max-age=604800, no-transform"
+_PREVIEW_CACHE = "private, max-age=86400, no-transform"
+_ORIGINAL_CACHE = "no-store"
 
 # Pictures taken straight from the conversation; the rest of the budget stays
 # free for role-tagged reference uploads. The hard cap lives in refbridge.
@@ -712,9 +715,12 @@ class AIImagePlugin(BasePlugin):
                 retention_hours=int(section.get("task_retention_hours", 24) or 24),
             )
         if self._gallery is not None:
-            self._gallery.update_config({
+            changed = self._gallery.update_config({
                 "gallery": self._cfg("section_gallery") or {},
             })
+            if changed:
+                removed = await asyncio.to_thread(self._gallery.clear_derivatives)
+                logger.info("[aiimg] 画廊编码参数变了，清掉 %d 个旧派生文件", removed)
         self._prune_old_tasks()
 
     def _prune_old_tasks(self) -> None:
@@ -3869,6 +3875,9 @@ class AIImagePlugin(BasePlugin):
         registry = self._registry
         queue = self._queue.snapshot() if self._queue else {}
         queue.pop("recent", None)
+        gallery = self._gallery.stats() if self._gallery else {}
+        if self._gallery is not None:
+            gallery["encoding_version"] = self._gallery.encoding_version()
         return {
             "ready": self._ready,
             "version": _plugin_version(),
@@ -3877,7 +3886,7 @@ class AIImagePlugin(BasePlugin):
             "video_providers": registry.video_provider_ids() if registry else [],
             "provider_errors": registry.validate() if registry else [],
             "queue": queue,
-            "gallery": self._gallery.stats() if self._gallery else {},
+            "gallery": gallery,
             "startup_error": self._startup_error,
         }
 
@@ -4268,7 +4277,7 @@ class AIImagePlugin(BasePlugin):
         return FileResponse(
             path,
             media_type=media,
-            headers={"Cache-Control": "private, max-age=31536000, immutable"},
+            headers={"Cache-Control": _ORIGINAL_CACHE},
         )
 
     @register.api(method="GET", path="/aiimg/gallery/thumb", auth=True, summary="画廊缩略图")
@@ -4289,7 +4298,7 @@ class AIImagePlugin(BasePlugin):
             return FileResponse(
                 path,
                 media_type=mime,
-                headers={"Cache-Control": "private, max-age=31536000, immutable"},
+                headers={"Cache-Control": _THUMB_CACHE},
             )
         thumb = self._gallery.thumb_path(image_id)
         params = self._gallery.encoding_params()
@@ -4308,7 +4317,7 @@ class AIImagePlugin(BasePlugin):
         return FileResponse(
             thumb,
             media_type="image/jpeg" if params["thumb_format"].lower() == "jpeg" else "image/webp",
-            headers={"Cache-Control": "private, max-age=31536000, immutable"},
+            headers={"Cache-Control": _THUMB_CACHE},
         )
     @register.api(method="GET", path="/aiimg/gallery/preview", auth=True, summary="画廊预览图")
     async def api_gallery_preview(self, image_id: str, format: str = ""):
@@ -4331,7 +4340,7 @@ class AIImagePlugin(BasePlugin):
             return FileResponse(
                 path,
                 media_type=mime,
-                headers={"Cache-Control": "private, max-age=31536000, immutable"},
+                headers={"Cache-Control": _PREVIEW_CACHE},
             )
         if mime == "image/gif":
             from .core.image_store import ImageStore
@@ -4350,9 +4359,7 @@ class AIImagePlugin(BasePlugin):
                     return FileResponse(
                         webp_preview,
                         media_type="image/webp",
-                        headers={
-                            "Cache-Control": "private, max-age=31536000, immutable"
-                        },
+                        headers={"Cache-Control": _PREVIEW_CACHE},
                     )
                 # Tiny GIFs can be smaller than their WebP; fall through to GIF.
             gif_preview = self._gallery.gif_preview_path(image_id)
@@ -4364,7 +4371,7 @@ class AIImagePlugin(BasePlugin):
             return FileResponse(
                 gif_preview,
                 media_type="image/gif",
-                headers={"Cache-Control": "private, max-age=31536000, immutable"},
+                headers={"Cache-Control": _PREVIEW_CACHE},
             )
         preview = self._gallery.preview_path(image_id)
         params = self._gallery.encoding_params()
@@ -4385,7 +4392,7 @@ class AIImagePlugin(BasePlugin):
         return FileResponse(
             preview,
             media_type="image/webp" if fmt == "webp" else "image/jpeg",
-            headers={"Cache-Control": "private, max-age=31536000, immutable"},
+            headers={"Cache-Control": _PREVIEW_CACHE},
         )
 
     @register.api(method="GET", path="/aiimg/gallery/image", auth=True, summary="画廊图片（data URL）")

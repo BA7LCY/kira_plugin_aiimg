@@ -9,6 +9,8 @@ supports the edit/selfie convenience of referencing the most recent image.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import os
 import sqlite3
 import threading
@@ -25,6 +27,10 @@ from .image_format import (
 from .logbook import get_logger
 
 logger = get_logger("gallery")
+
+# Bump this when the preview/thumbnail encoding changes shape. It is part of
+# the browser URL so a plugin update cannot keep an old derivative forever.
+_DERIVATIVE_CACHE_SCHEME = "2"
 
 
 class ImageStore:
@@ -80,16 +86,72 @@ class ImageStore:
         ):
             self._db.execute(statement)
         self._db.commit()
+        self.prune_orphan_derivatives()
         self._last_images: dict[str, list[str]] = {}
 
     # -- persistence ---------------------------------------------------------
 
-    def update_config(self, config: dict) -> None:
-        """Swap retention/capacity rules after a settings change."""
+    def update_config(self, config: dict) -> bool:
+        """Swap retention/capacity rules; report whether encoding changed."""
+        before = self._encoding_params()
         self._config = config or {}
         params = self._encoding_params()
         self._thumb_format = params["thumb_format"]
         self._preview_format = params["preview_format"]
+        return before != params
+
+    def encoding_version(self) -> str:
+        """Stable cache-busting token for the current derivative settings."""
+        payload = {"scheme": _DERIVATIVE_CACHE_SCHEME, **self._encoding_params()}
+        raw = json.dumps(payload, sort_keys=True, ensure_ascii=True)
+        return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
+
+    def clear_derivatives(self) -> int:
+        """Drop every generated thumb/preview; originals are untouched."""
+        removed = 0
+        for folder in (self.thumb_dir, self.preview_dir):
+            try:
+                entries = list(folder.iterdir())
+            except OSError:
+                continue
+            for path in entries:
+                if not path.is_file():
+                    continue
+                try:
+                    path.unlink()
+                    removed += 1
+                except OSError:
+                    pass
+        return removed
+
+    def prune_orphan_derivatives(self) -> int:
+        """Delete derived files that no longer match a live gallery row."""
+        rows = self._execute("SELECT id FROM images").fetchall()
+        valid = set()
+        for row in rows:
+            image_id = str(row["id"])
+            valid.update(
+                {
+                    self.thumb_path(image_id).name,
+                    self.preview_path(image_id).name,
+                    self.gif_preview_path(image_id).name,
+                    self.gif_webp_preview_path(image_id).name,
+                }
+            )
+        removed = 0
+        for folder in (self.thumb_dir, self.preview_dir):
+            try:
+                entries = list(folder.iterdir())
+            except OSError:
+                continue
+            for path in entries:
+                if path.is_file() and path.name not in valid:
+                    try:
+                        path.unlink()
+                        removed += 1
+                    except OSError:
+                        pass
+        return removed
 
     def _execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         with self._lock:

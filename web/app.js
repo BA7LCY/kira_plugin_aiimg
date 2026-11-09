@@ -1674,8 +1674,13 @@ function galleryTile(image) {
   return tile;
 }
 
+function galleryVersion() {
+  const value = state.status?.gallery?.encoding_version || state.status?.version || "0";
+  return encodeURIComponent(String(value));
+}
+
 function loadThumb(img, imageId) {
-  img.src = `${BASE}/gallery/thumb?image_id=${encodeURIComponent(imageId)}`;
+  img.src = `${BASE}/gallery/thumb?image_id=${encodeURIComponent(imageId)}&v=${galleryVersion()}`;
   img.onerror = () => {
     img.alt = "图片读取失败";
   };
@@ -1853,14 +1858,15 @@ function openImage(imageId) {
   // is fetched in the background and swapped in only after it has loaded.
   if (!isVideo) {
     const isGif = String(image?.format || "").toLowerCase() === "gif";
-    const fallbackUrl = `${BASE}/gallery/preview?image_id=${viewId}`;
+    const version = galleryVersion();
+    const fallbackUrl = `${BASE}/gallery/preview?image_id=${viewId}&v=${version}`;
     const previewUrl = isGif ? `${fallbackUrl}&format=webp` : fallbackUrl;
-    const thumbUrl = `${BASE}/gallery/thumb?image_id=${viewId}`;
+    const thumbUrl = `${BASE}/gallery/thumb?image_id=${viewId}&v=${version}`;
     picture.src = thumbUrl;
     picture.onerror = () => {
       if (picture.src !== thumbUrl) return;
       picture.dataset.fallback = "file";
-      picture.src = `${BASE}/gallery/file?image_id=${viewId}`;
+      picture.src = `${BASE}/gallery/file?image_id=${viewId}&v=${version}`;
     };
     const full = new Image();
     full.decoding = "async";
@@ -1934,7 +1940,7 @@ function formatStamp(value) {
 function downloadImage(imageId) {
   const image = state.gallery.find((item) => item.id === imageId);
   const link = document.createElement("a");
-  link.href = `${BASE}/gallery/file?image_id=${encodeURIComponent(imageId)}`;
+  link.href = `${BASE}/gallery/file?image_id=${encodeURIComponent(imageId)}&v=${galleryVersion()}`;
   link.download = image?.filename || `aiimg-${imageId}`;
   document.body.append(link);
   link.click();

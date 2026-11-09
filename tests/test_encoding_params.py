@@ -88,6 +88,31 @@ def test_store_writes_derivatives_in_the_configured_format(tmp_path):
     assert _format(preview.read_bytes()) == "WEBP"
 
 
+def test_encoding_version_changes_and_clears_derivatives(tmp_path):
+    store = ImageStore(tmp_path, {"gallery": {}})
+    before = store.encoding_version()
+    store.write_derivatives("img1", _png(600, 400))
+    thumb = store.thumb_path("img1")
+    preview = store.preview_path("img1")
+    assert thumb.is_file() and preview.is_file()
+
+    assert store.update_config({"gallery": {"thumb_quality": 50}}) is True
+    assert store.encoding_version() != before
+    assert store.clear_derivatives() >= 2
+    assert not thumb.exists() and not preview.exists()
+
+
+def test_orphan_derivatives_are_removed(tmp_path):
+    store = ImageStore(tmp_path, {"gallery": {}})
+    store.write_derivatives("orphan", _png(600, 400))
+    assert store.thumb_path("orphan").is_file()
+    assert store.preview_path("orphan").is_file()
+
+    assert store.prune_orphan_derivatives() >= 2
+    assert not store.thumb_path("orphan").exists()
+    assert not store.preview_path("orphan").exists()
+
+
 def test_encoding_params_fall_back_to_defaults(tmp_path):
     store = ImageStore(tmp_path, {"gallery": {}})
     params = store.encoding_params()
