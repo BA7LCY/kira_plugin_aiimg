@@ -1,7 +1,7 @@
 """Provider backend registry: builds and caches backends from config.
 
 The `providers` config array holds one entry per provider. Each entry carries
-its template key (or a short alias), endpoint settings and model. Backends
+its template key, endpoint settings and model. Backends
 are built lazily and cached, so a broken provider does not prevent the plugin
 from loading and does not block other providers.
 """

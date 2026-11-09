@@ -1,5 +1,12 @@
 # 更新日志
 
+## v0.5.13（2026-11-09）
+
+### 变更
+
+- 移除旧版 Kira 事件形状兼容：通知只读取 3.0 批量事件的 `messages`，不再回退单条 `message`；合成通知事件直接使用 `supported_elements`，不再探测 `message_types`；触发通知只调用 `trigger(force=True)`。
+- 功能链条目只接受 `provider` 键，不再接受旧版 `id` 键。
+
 ## v0.5.12（2026-11-09）
 
 ### 变更

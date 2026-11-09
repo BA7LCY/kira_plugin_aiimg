@@ -1187,43 +1187,20 @@ def test_notice_asks_the_pipeline_to_answer(plugin_module, tmp_path):
     assert calls == [True]
 
 
-def test_notice_survives_an_older_trigger_signature(plugin_module, tmp_path):
-    calls = []
-
-    def trigger(self):
-        calls.append("bare")
-        return True
-
-    plugin_module.KiraMessageEvent.trigger = trigger
-    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), _config())
-    plugin.ctx.adapter_mgr = _AdapterMgr(_Adapter())
-    plugin.ctx.event_bus = _Bus()
-    record = plugin_module.TaskRecord(
-        task_id="t4",
-        kind="generate_image",
-        sid="s4",
-        status="failed",
-        error="HTTP 503",
-        extra={"adapter": "qq", "session_type": "gm", "session_id": "g1"},
-    )
-
-    asyncio.run(plugin._notify_failure(record))
-
-    assert calls == ["bare"]
-
-
 def test_error_notice_prompt_renders_task_facts(plugin_module, tmp_path):
     config = _config()
     config["section_prompts"]["result_notification_prompt"] = "Explain {{error_kind}} in persona."
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     event = types.SimpleNamespace(
-        message=types.SimpleNamespace(
-            extra={
-                "_aiimg_task_error": "t3",
-                "_aiimg_template_key": "result_notification_prompt",
-                "_aiimg_facts": {"task_id": "t3", "error_kind": "服务商报错"},
-            }
-        )
+        messages=[
+            types.SimpleNamespace(
+                extra={
+                    "_aiimg_task_error": "t3",
+                    "_aiimg_template_key": "result_notification_prompt",
+                    "_aiimg_facts": {"task_id": "t3", "error_kind": "服务商报错"},
+                }
+            )
+        ]
     )
     req = _Req()
 
@@ -1240,13 +1217,15 @@ def test_error_notice_without_a_prompt_still_gives_the_model_facts(
     config["section_prompts"]["result_notification_prompt"] = ""
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     event = types.SimpleNamespace(
-        message=types.SimpleNamespace(
-            extra={
-                "_aiimg_task_error": "t6",
-                "_aiimg_template_key": "result_notification_prompt",
-                "_aiimg_facts": {"task_id": "t6", "error_kind": "超时"},
-            }
-        )
+        messages=[
+            types.SimpleNamespace(
+                extra={
+                    "_aiimg_task_error": "t6",
+                    "_aiimg_template_key": "result_notification_prompt",
+                    "_aiimg_facts": {"task_id": "t6", "error_kind": "超时"},
+                }
+            )
+        ]
     )
     req = _Req()
 
@@ -1265,19 +1244,21 @@ def test_success_notice_without_a_prompt_still_gives_the_model_facts(
     config["section_prompts"]["result_notification_prompt"] = ""
     plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path), config)
     event = types.SimpleNamespace(
-        message=types.SimpleNamespace(
-            extra={
-                "_aiimg_task": "t7",
-                "_aiimg_template_key": "result_notification_prompt",
-                "_aiimg_facts": {
-                    "task_id": "t7",
-                    "kind": "generate_image",
-                    "status": "succeeded",
-                    "size": "1024x1024",
-                    "provider": "fair",
-                },
-            }
-        )
+        messages=[
+            types.SimpleNamespace(
+                extra={
+                    "_aiimg_task": "t7",
+                    "_aiimg_template_key": "result_notification_prompt",
+                    "_aiimg_facts": {
+                        "task_id": "t7",
+                        "kind": "generate_image",
+                        "status": "succeeded",
+                        "size": "1024x1024",
+                        "provider": "fair",
+                    },
+                }
+            )
+        ]
     )
     req = _Req()
 

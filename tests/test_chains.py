@@ -28,6 +28,9 @@ def test_parse_invalid():
         parse_chain_item("")
     with pytest.raises(ValueError):
         parse_chain_item({"output": "1:1"})
+    # The old `id` key is not accepted anymore; only `provider` is current.
+    with pytest.raises(ValueError):
+        parse_chain_item({"id": "p1"})
 
 
 def test_chain_for_feature_key():

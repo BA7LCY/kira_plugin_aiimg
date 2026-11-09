@@ -12,8 +12,7 @@ from dataclasses import dataclass
 from typing import Any
 
 # Feature keys usable in the `chains` config. They match the Kira tool names
-# so a user can reason about which chain a tool uses. Short aliases are
-# accepted for readability.
+# so a user can reason about which chain a tool uses.
 FEATURES = (
     "generate_image",
     "edit_image",
@@ -33,7 +32,7 @@ class ChainItem:
 def parse_chain_item(item: Any) -> ChainItem:
     """Parse one chain entry: string or {provider, output} object."""
     if isinstance(item, dict):
-        provider_id = str(item.get("provider") or item.get("id") or "").strip()
+        provider_id = str(item.get("provider") or "").strip()
         output = str(item.get("output") or "").strip()
         if not provider_id:
             raise ValueError("链条目缺少 provider")

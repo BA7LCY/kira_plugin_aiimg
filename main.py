@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import inspect
 import json
 import time
 import weakref
@@ -156,16 +155,8 @@ def _facts_text(facts: dict[str, Any]) -> str:
 
 
 def _notification_extra(event: Any) -> dict:
-    """Find the aiimg markers on either event shape.
-
-    The workflow hands plugins a ``KiraMessageBatchEvent`` (``messages`` list)
-    while older call sites expose a single ``message``; reading only the latter
-    silently skipped every notification.
-    """
+    """Find the aiimg markers on a batch event's messages."""
     candidates: list[Any] = list(getattr(event, "messages", None) or [])
-    single = getattr(event, "message", None)
-    if single is not None:
-        candidates.append(single)
     extras: list[Any] = [getattr(item, "extra", None) for item in candidates]
     extras.append(getattr(event, "extra", None))
     for extra in extras:
@@ -176,21 +167,16 @@ def _notification_extra(event: Any) -> dict:
     return {}
 
 
-def _event_elements_kw(adapter: Any) -> dict:
-    """Cross-generation keyword for supported elements on a synthetic event."""
-    params = set(inspect.signature(KiraMessageEvent.__init__).parameters)
+def _supported_elements(adapter: Any) -> list[str]:
+    """Elements the adapter can output, for a synthetic notification event."""
     elements = getattr(adapter, "supported_elements", None)
     if elements is None:
-        elements = list(
-            getattr(
-                getattr(adapter, "capabilities", None),
-                "supported_elements",
-                ["text", "image"],
-            )
+        elements = getattr(
+            getattr(adapter, "capabilities", None),
+            "supported_elements",
+            ["text", "image"],
         )
-    if "supported_elements" in params:
-        return {"supported_elements": elements}
-    return {"message_types": elements}
+    return list(elements)
 
 
 def _looks_like_image(data: bytes) -> bool:
@@ -2459,9 +2445,6 @@ class AIImagePlugin(BasePlugin):
         "use the photo I replied to" request lives.
         """
         messages = list(getattr(event, "messages", None) or [])
-        single = getattr(event, "message", None)
-        if single is not None:
-            messages.append(single)
         for message in reversed(messages):
             chain = list(getattr(message, "chain", None) or [])
             quoted: list[tuple[Any, str]] = []
@@ -3719,7 +3702,7 @@ class AIImagePlugin(BasePlugin):
                 is_mentioned=True,
             ),
             timestamp=int(time.time()),
-            **_event_elements_kw(adapter),
+            supported_elements=_supported_elements(adapter),
         )
         event.session = Session(
             adapter_name=adapter_name,
@@ -3734,10 +3717,7 @@ class AIImagePlugin(BasePlugin):
         # Ask the pipeline to answer this message instead of discarding it.
         trigger = getattr(event, "trigger", None)
         if callable(trigger):
-            try:
-                trigger(force=True)
-            except TypeError:
-                trigger()
+            trigger(force=True)
         try:
             await self.ctx.event_bus.publish(event)
         except Exception as exc:
