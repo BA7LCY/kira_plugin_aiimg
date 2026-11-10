@@ -436,12 +436,6 @@ CONSOLE_ONLY_FEATURES: dict[str, dict[str, Any]] = {
         "default": "",
         "note": "自己上传的参考照片，可多张；在下面点「管理文件」上传。",
     },
-    "selfie_include_uploads": {
-        "type": "switch",
-        "name": "自拍同时使用上传图",
-        "default": False,
-        "note": "打开后人设参考人像会和上传的参考图一起使用：人设图固定人物身份，上传图按各自的角色补充服装、画风、姿势或背景。关掉只用人设图。",
-    },
     "selfie_use_persona": {
         "type": "switch",
         "name": "使用人设自拍图",

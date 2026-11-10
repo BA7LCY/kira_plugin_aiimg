@@ -181,8 +181,7 @@ def test_console_only_fields_follow_the_order_of_the_saved_layout():
     assert keys.index("selfie_default_output") < keys.index("prefer_resolution")
     assert keys.index("prefer_resolution") < keys.index("selfie_follow_edit_chain")
     assert keys.index("selfie_follow_edit_chain") < keys.index("selfie_reference_files")
-    assert keys.index("selfie_reference_files") < keys.index("selfie_include_uploads")
-    assert keys.index("selfie_include_uploads") < keys.index("selfie_use_persona")
+    assert keys.index("selfie_reference_files") < keys.index("selfie_use_persona")
 
 
 def test_prompt_card_groups_moved_and_new_fields():
@@ -278,17 +277,11 @@ def test_layout_only_values_stay_out_of_the_saved_config():
     assert "selfie_reference_files" not in out["section_features"]
 
 
-def test_selfie_include_uploads_defaults_to_off():
-    config = S.with_defaults({})
+def test_selfie_include_uploads_is_gone():
+    config = S.normalize(S.with_defaults({"section_features": {"selfie_include_uploads": True}}))
 
-    assert config["section_features"]["selfie_include_uploads"] is False
-    assert S.field_default("section_features", "selfie_include_uploads") is False
-
-
-def test_selfie_include_uploads_preserves_a_saved_value():
-    config = S.with_defaults({"section_features": {"selfie_include_uploads": True}})
-
-    assert config["section_features"]["selfie_include_uploads"] is True
+    assert "selfie_include_uploads" not in config["section_features"]
+    assert "selfie_include_uploads" not in S.schema()["section_features"]["fields"]
 
 
 def test_sections_start_collapsed():

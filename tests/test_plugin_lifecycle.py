@@ -1374,20 +1374,15 @@ _PNG_B64 = (
 )
 
 
-def _plan_config(use_persona: bool, include_uploads: bool) -> dict:
+def _plan_config(use_persona: bool) -> dict:
     config = _config()
     config["section_features"]["selfie_use_persona"] = use_persona
-    config["section_features"]["selfie_include_uploads"] = include_uploads
     return config
 
 
-def _plan_plugin(
-    plugin_module, data_dir: Path, use_persona: bool, include_uploads: bool, persona: Path | None = None
-):
+def _plan_plugin(plugin_module, data_dir: Path, use_persona: bool, persona: Path | None = None):
     manager = _PersonaMgr(path=str(persona)) if persona is not None else None
-    plugin = plugin_module.AIImagePlugin(
-        _Ctx(data_dir, manager), _plan_config(use_persona, include_uploads)
-    )
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir, manager), _plan_config(use_persona))
     plugin._data_dir = data_dir
     return plugin
 
@@ -1408,7 +1403,7 @@ async def test_selfie_plan_sends_only_the_persona_by_default(plugin_module, tmp_
     refs_mod.append_entry(data_dir, "refs/a.png")
     manager = _PersonaMgr(path=str(persona))
     plugin = plugin_module.AIImagePlugin(
-        _Ctx(data_dir, manager), _plan_config(True, False)
+        _Ctx(data_dir, manager), _plan_config(True)
     )
     plugin._data_dir = data_dir
 
@@ -1418,46 +1413,16 @@ async def test_selfie_plan_sends_only_the_persona_by_default(plugin_module, tmp_
     assert manager.calls == 1
 
 
-async def test_selfie_plan_merges_uploads_in_index_order(plugin_module, tmp_path):
+async def test_selfie_plan_ignores_uploads_while_persona_mode_is_on(plugin_module, tmp_path):
     data_dir = tmp_path / "data"
     persona = _ref_file(data_dir / "persona.png")
-    clothing = _ref_file(data_dir / "refs" / "clothing.png")
-    subject = _ref_file(data_dir / "refs" / "subject.png")
-    refs_mod.save_entries(
-        data_dir,
-        [
-            {"file": "refs/clothing.png", "role": "clothing", "added_at": 2},
-            {"file": "refs/subject.png", "role": "subject", "added_at": 1},
-        ],
-    )
-    plugin = _plan_plugin(plugin_module, data_dir, True, True, persona)
-
-    plan = await plugin._selfie_reference_plan()
-
-    assert plan == [
-        (persona, "persona"),
-        (clothing, "clothing"),
-        (subject, "subject"),
-    ]
-
-
-async def test_selfie_plan_roles_force_uploads_without_the_switch(plugin_module, tmp_path):
-    data_dir = tmp_path / "data"
-    persona = _ref_file(data_dir / "persona.png")
-    background = _ref_file(data_dir / "refs" / "background.png")
     _ref_file(data_dir / "refs" / "clothing.png")
-    refs_mod.save_entries(
-        data_dir,
-        [
-            {"file": "refs/background.png", "role": "background", "added_at": 1},
-            {"file": "refs/clothing.png", "role": "clothing", "added_at": 2},
-        ],
-    )
-    plugin = _plan_plugin(plugin_module, data_dir, True, False, persona)
+    refs_mod.append_entry(data_dir, "refs/clothing.png")
+    plugin = _plan_plugin(plugin_module, data_dir, True, persona)
 
-    plan = await plugin._selfie_reference_plan(["background"])
+    plan = await plugin._selfie_reference_plan(["clothing"])
 
-    assert plan == [(persona, "persona"), (background, "background")]
+    assert plan == [(persona, "persona")]
 
 
 async def test_selfie_plan_without_persona_mode_uses_uploads(plugin_module, tmp_path):
@@ -1471,30 +1436,24 @@ async def test_selfie_plan_without_persona_mode_uses_uploads(plugin_module, tmp_
             {"file": "refs/b.png", "role": "subject", "added_at": 2},
         ],
     )
-    plugin = _plan_plugin(plugin_module, data_dir, False, True)
+    plugin = _plan_plugin(plugin_module, data_dir, False)
 
     plan = await plugin._selfie_reference_plan()
 
     assert plan == [(first, "pose"), (second, "subject")]
 
 
-async def test_selfie_plan_keeps_uploads_when_the_persona_photo_is_missing(
+async def test_selfie_plan_requires_a_persona_when_persona_mode_is_on(
     plugin_module, tmp_path
 ):
     data_dir = tmp_path / "data"
-    photo = _ref_file(data_dir / "refs" / "a.png")
+    _ref_file(data_dir / "refs" / "a.png")
     refs_mod.append_entry(data_dir, "refs/a.png")
     gone = data_dir / "gone.png"
 
-    merged = await _plan_plugin(plugin_module, data_dir, True, True, gone)._selfie_reference_plan()
-    filtered = await _plan_plugin(plugin_module, data_dir, True, False, gone)._selfie_reference_plan(
-        ["subject"]
-    )
-    persona_only = await _plan_plugin(plugin_module, data_dir, True, False, gone)._selfie_reference_plan()
+    plugin = _plan_plugin(plugin_module, data_dir, True, gone)
 
-    assert merged == [(photo, "subject")]
-    assert filtered == [(photo, "subject")]
-    assert persona_only == []
+    assert await plugin._selfie_reference_plan(["subject"]) == []
 
 
 async def test_generate_selfie_filters_uploads_by_role(plugin_module, tmp_path):
@@ -1508,7 +1467,7 @@ async def test_generate_selfie_filters_uploads_by_role(plugin_module, tmp_path):
             {"file": "refs/pose.png", "role": "pose", "added_at": 2},
         ],
     )
-    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False, False))
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False))
     await plugin.initialize()
     captured = []
 
@@ -1544,7 +1503,7 @@ async def test_generate_selfie_rejects_unknown_roles(plugin_module, tmp_path):
     data_dir = tmp_path / "data"
     _ref_file(data_dir / "refs" / "a.png")
     refs_mod.append_entry(data_dir, "refs/a.png")
-    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False, False))
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False))
     await plugin.initialize()
     try:
         ack = await plugin.generate_selfie(_tool_event(), reference_roles=["face"])
@@ -1559,7 +1518,7 @@ async def test_generate_selfie_rejects_more_than_eight_references(plugin_module,
     for index in range(9):
         _ref_file(data_dir / "refs" / f"r{index}.png")
         refs_mod.append_entry(data_dir, f"refs/r{index}.png")
-    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False, False))
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False))
     await plugin.initialize()
     try:
         ack = await plugin.generate_selfie(_tool_event())
@@ -1573,7 +1532,7 @@ async def test_generate_selfie_explains_missing_references(plugin_module, tmp_pa
     data_dir = tmp_path / "data"
     plugin = plugin_module.AIImagePlugin(
         _Ctx(data_dir, _PersonaMgr(path=str(data_dir / "gone.png"))),
-        _plan_config(True, False),
+        _plan_config(True),
     )
     await plugin.initialize()
     try:
@@ -1585,7 +1544,7 @@ async def test_generate_selfie_explains_missing_references(plugin_module, tmp_pa
 
 
 async def test_generate_selfie_explains_missing_uploads(plugin_module, tmp_path):
-    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path / "data"), _plan_config(False, False))
+    plugin = plugin_module.AIImagePlugin(_Ctx(tmp_path / "data"), _plan_config(False))
     await plugin.initialize()
     try:
         ack = await plugin.generate_selfie(_tool_event())
@@ -1598,7 +1557,7 @@ async def test_generate_selfie_explains_missing_uploads(plugin_module, tmp_path)
 async def test_generate_image_batch_carries_the_reference_image(plugin_module, tmp_path):
     data_dir = tmp_path / "data"
     photo = _ref_file(data_dir / "input.png")
-    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False, False))
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False))
     await plugin.initialize()
     captured = []
 
@@ -1624,7 +1583,7 @@ async def test_generate_image_batch_carries_the_reference_image(plugin_module, t
 async def test_generate_image_batch_prefixes_selfie_prompts(plugin_module, tmp_path):
     data_dir = tmp_path / "data"
     photo = _ref_file(data_dir / "input.png")
-    config = _plan_config(False, False)
+    config = _plan_config(False)
     config["section_prompts"] = {"selfie_prompt_prefix": "固定人物，第三人称"}
     plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), config)
     await plugin.initialize()
@@ -1659,7 +1618,7 @@ async def test_edit_image_sends_role_filtered_uploads(plugin_module, tmp_path):
             {"file": "refs/other.png", "role": "subject", "added_at": 2},
         ],
     )
-    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False, False))
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False))
     await plugin.initialize()
     captured = []
 
@@ -1710,7 +1669,7 @@ async def test_edit_image_rejects_more_than_eight_references(plugin_module, tmp_
             {"file": f"refs/style{index}.png", "role": "style", "added_at": index}
         )
     refs_mod.save_entries(data_dir, entries)
-    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False, False))
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False))
     await plugin.initialize()
 
     async def fake_input(event, image):
@@ -1732,7 +1691,7 @@ async def test_selfie_runner_appends_the_reference_note(plugin_module, tmp_path)
     data_dir = tmp_path / "data"
     persona = _ref_file(data_dir / "persona.png")
     clothing = _ref_file(data_dir / "clothing.png")
-    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False, False))
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False))
     await plugin.initialize()
     sent = {}
 
@@ -1770,7 +1729,7 @@ async def test_selfie_runner_appends_the_reference_note(plugin_module, tmp_path)
 async def test_selfie_runner_leaves_a_single_image_prompt_alone(plugin_module, tmp_path):
     data_dir = tmp_path / "data"
     persona = _ref_file(data_dir / "persona.png")
-    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False, False))
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False))
     await plugin.initialize()
     sent = {}
 
@@ -1798,7 +1757,7 @@ async def test_edit_runner_labels_the_original_before_role_refs(plugin_module, t
     data_dir = tmp_path / "data"
     base = _ref_file(tmp_path / "base.png")
     style = _ref_file(tmp_path / "style.png")
-    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False, False))
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False))
     await plugin.initialize()
     sent = {}
 
@@ -1831,7 +1790,7 @@ async def test_reference_role_api_updates_the_index(monkeypatch, plugin_module, 
     data_dir = tmp_path / "data"
     _ref_file(data_dir / "refs" / "a.png")
     refs_mod.append_entry(data_dir, "refs/a.png")
-    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False, False))
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False))
     plugin._data_dir = data_dir
 
     payload = await plugin.api_files_role({"name": "refs/a.png", "role": "style"})
@@ -1866,7 +1825,7 @@ async def test_reference_order_api_requires_the_whole_list(monkeypatch, plugin_m
             {"file": "refs/b.png", "role": "subject", "added_at": 2},
         ],
     )
-    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False, False))
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False))
     plugin._data_dir = data_dir
 
     payload = await plugin.api_files_order({"names": ["refs/b.png", "refs/a.png"]})
@@ -1884,7 +1843,7 @@ async def test_reference_order_api_requires_the_whole_list(monkeypatch, plugin_m
 
 async def test_upload_appends_subject_entries(plugin_module, tmp_path):
     data_dir = tmp_path / "data"
-    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False, False))
+    plugin = plugin_module.AIImagePlugin(_Ctx(data_dir), _plan_config(False))
     plugin._data_dir = data_dir
 
     await plugin.api_files_upload(

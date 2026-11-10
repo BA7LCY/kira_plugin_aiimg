@@ -556,21 +556,14 @@ class AIImagePlugin(BasePlugin):
     ) -> list[tuple[Path, str]]:
         """Final selfie references as (path, role) in send order.
 
-        Persona mode sends only the persona photo unless the merge switch (or an
-        explicit role filter) also asks for uploads; without persona mode uploads
-        are used alone.
+        Persona mode uses only the persona photo. Uploaded references are used
+        only when persona mode is off; the two sources are never mixed.
         """
-        uploads = self._ref_paths(roles)
         if not self._feature_on("selfie_use_persona", True):
-            return uploads
+            return self._ref_paths(roles)
         persona = await self._persona_reference()
         if persona is None:
-            # Never drop a photo: with the merge switch on, uploads stay usable.
-            if self._feature_on("selfie_include_uploads", False) or roles is not None:
-                return uploads
             return []
-        if roles is not None or self._feature_on("selfie_include_uploads", False):
-            return [(persona, "persona")] + uploads
         return [(persona, "persona")]
 
     async def _selfie_references(self) -> list[Path]:
