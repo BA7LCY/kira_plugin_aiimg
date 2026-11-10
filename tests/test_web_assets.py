@@ -269,6 +269,8 @@ def test_api_keys_use_the_list_item_editor():
     assert "const savedId = state.providerSavedIds.get(provider);" in script
     assert "items = await providerFullKeys(savedId);" in script
     assert "state.providerSavedIds.set(provider, provider.id);" in script
+    # A refresh can replace state.config while the dialog is open.
+    assert "const live = (state.config.providers || []).find((item) => item.id === provider.id);" in script
     # A provider that is still referenced by a chain must not disappear silently.
     assert "function providerChainNames(providerId)" in script
     assert "先从功能链路移除" in script

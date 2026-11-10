@@ -2416,7 +2416,11 @@ async function openListEditorFor(target, title) {
       secret: field === "api_keys",
       items,
       onConfirm: (draft) => {
-        provider[field] = draft;
+        // The provider list can be replaced by a background refresh while the
+        // dialog is open; write to the current object, not the captured one.
+        const live = (state.config.providers || []).find((item) => item.id === provider.id);
+        if (!live) return;
+        live[field] = draft;
         render();
         updateTopbar();
       },
