@@ -3066,9 +3066,9 @@ function providerChainNames(providerId) {
     .map(([feature]) => feature);
 }
 
-function deleteProvider() {
+async function deleteProvider() {
   const provider = selectedProvider();
-  if (!provider) return;
+  if (!provider || state.saving) return;
   const used = providerChainNames(provider.id);
   if (used.length) {
     toast(`先从功能链路移除「${used.join("、")}」里的这个服务商`, "error");
@@ -3077,9 +3077,17 @@ function deleteProvider() {
   if (!confirmAction(`删除服务商「${provider.id}」？`)) {
     return;
   }
-  state.config.providers = state.config.providers.filter((item) => item.id !== provider.id);
+  const before = state.config.providers;
+  state.config.providers = before.filter((item) => item.id !== provider.id);
   state.selected = state.config.providers[0]?.id || null;
   render();
+  const saved = await save();
+  if (!saved) {
+    // Saving is the delete. Put the card back when the server refused it.
+    state.config.providers = before;
+    state.selected = provider.id;
+    render();
+  }
 }
 
 function renameProvider(nextId) {

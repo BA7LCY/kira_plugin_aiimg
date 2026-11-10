@@ -287,6 +287,8 @@ def test_api_keys_use_the_list_item_editor():
     assert 'class: "secret-input"' in script
     assert 'class: "secret-toggle"' in script
     assert 'title: "显示密钥"' in script
+
+
     assert 'toggle.replaceChildren(iconNode(hidden ? "eye-off" : "eye"));' in script
     assert "eye: [" in icons
     assert '"eye-off": [' in icons
@@ -323,6 +325,16 @@ def test_api_keys_use_the_list_item_editor():
 
     # The scrollbar gets its own gutter so it never sits on top of the text.
     assert "scrollbar-gutter: stable" in css
+
+
+def test_deleting_a_provider_saves_immediately():
+    script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    assert "async function deleteProvider()" in script
+    assert "const before = state.config.providers;" in script
+    assert "const saved = await save();" in script
+    assert "state.config.providers = before;" in script
+    assert "if (!saved) {" in script
 
 
 def test_confirmations_survive_the_plugin_iframe_sandbox():
