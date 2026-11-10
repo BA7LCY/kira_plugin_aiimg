@@ -147,6 +147,17 @@ async function api(path, options = {}) {
 }
 
 let toastTimer = 0;
+function confirmAction(message) {
+  // Kira renders plugin pages in a sandboxed iframe: window.confirm() is
+  // ignored there, while the same-origin parent can still show a dialog.
+  try {
+    if (window.top && window.top !== window) return window.top.confirm(message);
+  } catch (error) {
+    // Cross-origin parent: fall back to the local dialog.
+  }
+  return window.confirm(message);
+}
+
 function toast(message, tone = "info") {
   const node = $("#toast");
   node.textContent = message;
@@ -312,7 +323,7 @@ async function save(allowReload = false) {
     return true;
   } catch (error) {
     const message = String(error.message || error);
-    if (!allowReload && message.includes("任务在跑") && window.confirm(`${message}。现在就应用吗？`)) {
+    if (!allowReload && message.includes("任务在跑") && confirmAction(`${message}。现在就应用吗？`)) {
       state.saving = false;
       return save(true);
     }
@@ -3063,7 +3074,7 @@ function deleteProvider() {
     toast(`先从功能链路移除「${used.join("、")}」里的这个服务商`, "error");
     return;
   }
-  if (!window.confirm(`删除服务商「${provider.id}」？`)) {
+  if (!confirmAction(`删除服务商「${provider.id}」？`)) {
     return;
   }
   state.config.providers = state.config.providers.filter((item) => item.id !== provider.id);
@@ -3394,7 +3405,7 @@ async function favoriteImage(imageId, favorite) {
 }
 
 async function deleteImage(imageId) {
-  if (!window.confirm("删除这张图片？文件也会一起删掉。")) return;
+  if (!confirmAction("删除这张图片？文件也会一起删掉。")) return;
   try {
     await api("/gallery/delete", {
       method: "POST",
@@ -3413,7 +3424,7 @@ async function bulkGallery(action) {
   if (!ids.length) return;
   if (
     action === "delete" &&
-    !window.confirm(`删除选中的 ${ids.length} 张图片？文件也会一起删掉。`)
+    !confirmAction(`删除选中的 ${ids.length} 张图片？文件也会一起删掉。`)
   ) {
     return;
   }
@@ -3558,7 +3569,7 @@ function bind() {
   $("#btn-save").addEventListener("click", () => save(false));
   $("#btn-discard").addEventListener("click", () => {
     if (!dirty()) return;
-    if (!window.confirm("放弃这次修改？")) return;
+    if (!confirmAction("放弃这次修改？")) return;
     state.config = structuredClone(state.original);
     render();
   });

@@ -3902,10 +3902,6 @@ class AIImagePlugin(BasePlugin):
             logger.exception("[aiimg] 配置读进来后补默认值失败，先用原始内容")
             merged = dict(cfg or {})
         templates = settings_mod.template_catalog()
-        logger.info(
-            "[aiimg] 下发配置：服务商 %d 家，密钥只给掩码",
-            len(merged.get("providers") or []),
-        )
         payload = {
             "revision": settings_mod.revision(cfg),
             "config": settings_mod.mask_providers(merged),

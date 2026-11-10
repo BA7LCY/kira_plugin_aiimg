@@ -325,6 +325,18 @@ def test_api_keys_use_the_list_item_editor():
     assert "scrollbar-gutter: stable" in css
 
 
+def test_confirmations_survive_the_plugin_iframe_sandbox():
+    script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
+
+    # Kira's plugin iframe has allow-scripts/allow-same-origin without
+    # allow-modals, so window.confirm() resolves to false. The top window can
+    # still show the dialog.
+    assert "function confirmAction(message)" in script
+    assert "return window.top.confirm(message);" in script
+    assert "if (!confirmAction(`删除服务商" in script
+    assert "window.confirm(`删除服务商" not in script
+
+
 def test_settings_form_tightens_numbers_and_autosizes_textareas():
     script = (WEB_DIR / "app.js").read_text(encoding="utf-8")
     css = (WEB_DIR / "app.css").read_text(encoding="utf-8")

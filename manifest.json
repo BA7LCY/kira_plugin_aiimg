@@ -1,7 +1,7 @@
 {
   "plugin_id": "kira_plugin_aiimg",
   "display_name": "AI Image",
-  "version": "0.5.16",
+  "version": "0.5.17",
   "author": "BA7LCY",
   "icon": "icon.png",
   "description": "KiraAI 原生多服务商生图、改图、自拍、批量与视频插件，全部配置在 WebUI 完成。",
