@@ -37,6 +37,17 @@ def test_save_and_get(tmp_path):
     _close(store)
 
 
+def test_saving_an_image_runs_retention_cleanup(tmp_path):
+    store = ImageStore(tmp_path, {"gallery": {"max_count": 1}})
+    first = _save(store, task_id="t1")
+    second = _save(store, task_id="t2")
+
+    assert not first.exists()
+    assert second.exists()
+    assert [row["id"] for row in store.list_gallery()] == [_id(second)]
+    _close(store)
+
+
 def test_gallery_uses_write_ahead_logging(tmp_path):
     store = ImageStore(tmp_path, {})
     mode = store._db.execute("PRAGMA journal_mode").fetchone()[0]

@@ -335,16 +335,11 @@ class AIImagePlugin(BasePlugin):
 
     async def _deferred_housekeeping(self) -> None:
         await asyncio.sleep(0)
-        while self._ready:
-            try:
-                await asyncio.to_thread(self._prune_old_tasks)
-                if self._gallery is not None:
-                    await self._gallery.cleanup()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.warning("[aiimg] 后台清理失败：%s", exc)
-            await asyncio.sleep(300)
+        started = time.perf_counter()
+        await asyncio.to_thread(self._prune_old_tasks)
+        logger.info(
+            "[aiimg] 后台清理用时 %.0f 毫秒", (time.perf_counter() - started) * 1000
+        )
 
     async def terminate(self):
         self._ready = False
@@ -712,9 +707,6 @@ class AIImagePlugin(BasePlugin):
             if changed:
                 removed = await asyncio.to_thread(self._gallery.clear_derivatives)
                 logger.info("[aiimg] 画廊编码参数变了，清掉 %d 个旧派生文件", removed)
-            # A lowered retention/count must take effect on save, not only
-            # after the next image arrives.
-            await self._gallery.cleanup()
         self._prune_old_tasks()
 
     def _prune_old_tasks(self) -> None:
