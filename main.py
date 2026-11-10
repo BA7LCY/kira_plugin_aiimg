@@ -13,6 +13,7 @@ import copy
 import json
 import time
 import weakref
+from dataclasses import replace
 from datetime import datetime, timedelta
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -4090,6 +4091,15 @@ class AIImagePlugin(BasePlugin):
             raise HTTPException(400, "先填好 API Key 再获取模型")
         url = root.rstrip("/") + "/models"
         policy = self._fetch_policy()
+        draft_origin = origin(root)
+        if draft_origin:
+            # This is an authenticated, one-shot model discovery call. The
+            # address is deliberately taken from the draft, so treat only this
+            # origin as trusted for this request; it is never persisted.
+            policy = replace(
+                policy,
+                trusted_origins=policy.trusted_origins | frozenset({draft_origin}),
+            )
         try:
             await ensure_url_allowed(url, policy)
         except ValueError as exc:
