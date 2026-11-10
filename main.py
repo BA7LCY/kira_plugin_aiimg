@@ -4074,16 +4074,20 @@ class AIImagePlugin(BasePlugin):
         root = base_url or server_url
         if not root:
             raise HTTPException(400, "先填好接口地址再获取模型")
-        # 只给已经保存过的服务商拉模型：地址来自请求体、又带着真钥去请求，
-        # 等于给了一个把密钥发到任意主机的口子。
+        # Model discovery is a draft-field operation: a new provider may not be
+        # saved yet, and its URL/key still need to be usable. The address is
+        # checked by ensure_url_allowed below; only saved providers can fall
+        # back to their stored key when the request carries a masked value.
         saved = self._saved_provider_for(root)
-        if saved is None:
-            raise HTTPException(400, "先把接口地址保存成服务商，再拉取模型")
-        stored_keys = [str(key) for key in (saved.get("api_keys") or []) if str(key).strip()]
+        stored_keys = [
+            str(key) for key in ((saved or {}).get("api_keys") or []) if str(key).strip()
+        ]
         if api_key:
             api_key = settings_mod.unmask_key(api_key, self.plugin_cfg)
         if not api_key and stored_keys:
             api_key = stored_keys[0]
+        if not api_key:
+            raise HTTPException(400, "先填好 API Key 再获取模型")
         url = root.rstrip("/") + "/models"
         policy = self._fetch_policy()
         try:
